@@ -85,34 +85,37 @@ class LLMOrchestratorProtocol(Protocol):
 
 _PLANNING_SYSTEM_PROMPT = """\
 You are the planning component of an AI agent. Given a goal and a list of \
-available tools, you must produce a JSON array of steps to accomplish the goal.
+available tools, produce a JSON array of steps to accomplish the goal.
 
 Available tools:
 {tools_json}
 
-Output format — a JSON array, NOTHING else:
+Output format — a JSON array, NOTHING else, no markdown fences:
 [
   {{
     "step_index": 0,
-    "tool_name": "<tool name from the list above>",
+    "tool_name": "<EXACT tool name from the list above>",
     "tool_args": {{<keyword args matching the tool's input_schema>}},
     "description": "<one sentence: why this step is needed>"
   }},
   ...
 ]
 
-Rules:
-- Output only the JSON array. No prose, no markdown fences, no explanation.
-- Use only tool names that appear in the available tools list.
-- tool_args must match the required fields in each tool's input_schema.
-- Keep the plan minimal — use the fewest steps that accomplish the goal.
+CRITICAL RULES — violating any of these will cause the agent to fail:
+- Output only the JSON array. No prose, no markdown fences, no code blocks.
+- You MUST use only tool names that appear EXACTLY in the available tools list above.
+- Do NOT invent tool names. Do NOT use 'text_summarize', 'web_search', or any \
+tool not explicitly listed.
+- tool_args keys must match the required fields in each tool's input_schema exactly.
+- Keep the plan minimal — fewest steps that accomplish the goal.
+- If reading a file is needed, use 'file_read' with a 'path' argument.
 """.strip()
 
 _REPLAN_SYSTEM_PROMPT = """\
 You are the re-planning component of an AI agent. A previous step failed. \
-Review the failure and produce a revised JSON array of remaining steps.
+Produce a revised JSON array of remaining steps.
 
-Available tools:
+Available tools (use ONLY these — do NOT invent tool names):
 {tools_json}
 
 Failed step:
@@ -123,8 +126,9 @@ Failed step:
 Remaining goal context:
 {goal}
 
-Output format — a JSON array of remaining steps (same schema as before), \
-NOTHING else.
+Output format — a JSON array of remaining steps (same schema as before, NO markdown \
+fences), NOTHING else.
+Use ONLY tool names that appear exactly in the available tools list above.
 """.strip()
 
 _SYNTHESIS_SYSTEM_PROMPT = """\
@@ -193,14 +197,38 @@ def _parse_plan(raw: str) -> list[PlannedStep]:
     """
     Extract a JSON array from the LLM output and parse it into ``PlannedStep`` objects.
 
-    Tolerant: strips prose/markdown fences that the model sometimes adds.
+    Tolerant parser:
+    * Strips prose/markdown fences.
+    * Strips JavaScript-style single-line comments (``// ...``) that some
+      models emit inside JSON strings.
+    * Accepts both our schema ``{tool_name, tool_args}`` and the OpenAI
+      function-call schema ``{name, arguments}`` that some models emit.
+    * Removes steps that reference unknown tools (with a warning) rather than
+      letting the orchestrator exhaust retries on an invented tool name.
 
     Raises
     ------
     ValueError  if no valid JSON array can be extracted.
     """
-    # Strip markdown fences if present.
-    cleaned = re.sub(r"```(?:json)?\s*", "", raw, flags=re.IGNORECASE).strip()
+    import re as _re
+
+    # Strip markdown fences.
+    cleaned = _re.sub(r"```(?:json)?\s*", "", raw, flags=_re.IGNORECASE).strip()
+    cleaned = _re.sub(r"```\s*$", "", cleaned, flags=_re.IGNORECASE).strip()
+
+    # Strip JS single-line comments (// ...) — Python's json module rejects them.
+    # We do this line-by-line to avoid breaking URL strings that contain //.
+    cleaned_lines = []
+    for line in cleaned.splitlines():
+        # Remove trailing // comment, but only if it's outside a quoted string.
+        # Simple heuristic: if the line has an even number of " before //, strip.
+        comment_idx = line.find("//")
+        if comment_idx != -1:
+            prefix = line[:comment_idx]
+            if prefix.count('"') % 2 == 0:  # not inside a string
+                line = prefix.rstrip(", ")  # also strip trailing comma
+        cleaned_lines.append(line)
+    cleaned = "\n".join(cleaned_lines)
 
     # Find the outermost JSON array.
     start = cleaned.find("[")
@@ -218,14 +246,38 @@ def _parse_plan(raw: str) -> list[PlannedStep]:
     for item in items:
         if not isinstance(item, dict):
             raise ValueError(f"Plan step is not a dict: {item!r}")
-        missing = {"tool_name", "tool_args"} - item.keys()
-        if missing:
-            raise ValueError(f"Plan step missing required keys {missing}: {item!r}")
+
+        # Accept both {tool_name, tool_args} (our schema) and
+        # {name, arguments} (OpenAI function-call schema).
+        tool_name = item.get("tool_name") or item.get("name")
+        tool_args = (
+            item.get("tool_args")
+            or item.get("arguments")
+            or item.get("parameters")
+            or {}
+        )
+
+        if not tool_name:
+            raise ValueError(f"Plan step missing 'tool_name' or 'name': {item!r}")
+        if not isinstance(tool_args, dict):
+            raise ValueError(f"Plan step tool_args/arguments is not a dict: {item!r}")
+
+        # Filter out invented tool names early — log a warning and skip.
+        from app.tools.registry import TOOL_REGISTRY as _TOOL_REGISTRY
+        if tool_name not in _TOOL_REGISTRY:
+            _log.warning(
+                "Plan references unknown tool '%s' — removing from plan. "
+                "Available: %s",
+                tool_name,
+                list(_TOOL_REGISTRY),
+            )
+            continue  # skip this step
+
         steps.append(
             PlannedStep(
                 step_index=int(item.get("step_index", len(steps))),
-                tool_name=item["tool_name"],
-                tool_args=item.get("tool_args", {}),
+                tool_name=tool_name,
+                tool_args=tool_args,
                 description=item.get("description", ""),
             )
         )
