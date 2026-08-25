@@ -1,0 +1,74 @@
+# ============================================================
+# Sovereign Workbench — Model Registry
+# ============================================================
+# This file is the SINGLE source of truth for every model
+# available to the system. No model may be called at runtime
+# unless it has an entry here.
+#
+# Schema per entry:
+#   name           : human-readable key used throughout the codebase
+#   ollama_tag     : exact tag passed to `ollama pull` / the Ollama API
+#   endpoint       : Ollama OpenAI-compatible base URL (always localhost)
+#   modality       : text | vision | code | embedding
+#   context_length : maximum context window in tokens
+#   capability_tags: free-form list used by the router for capability matching
+#
+# IMPORTANT: endpoint must never point to any host other than localhost.
+# ============================================================
+
+models:
+  - name: qwen25_14b_instruct
+    ollama_tag: "qwen2.5:14b-instruct-q4_K_M"
+    endpoint: "http://localhost:11434"
+    modality: text
+    context_length: 32768
+    capability_tags:
+      - chat
+      - reasoning
+      - summarization
+      - document_qa
+      - default_text
+
+  - name: qwen25_coder_7b
+    ollama_tag: "qwen2.5-coder:7b"
+    endpoint: "http://localhost:11434"
+    modality: code
+    context_length: 32768
+    capability_tags:
+      - code_generation
+      - code_review
+      - debugging
+      - refactoring
+
+  - name: qwen25_coder_14b
+    ollama_tag: "qwen2.5-coder:14b"
+    endpoint: "http://localhost:11434"
+    modality: code
+    context_length: 32768
+    capability_tags:
+      - code_generation
+      - code_review
+      - debugging
+      - refactoring
+      - complex_code
+
+  - name: qwen25vl_7b
+    ollama_tag: "qwen2.5vl:7b"
+    endpoint: "http://localhost:11434"
+    modality: vision
+    context_length: 32768
+    capability_tags:
+      - image_understanding
+      - ocr
+      - document_vision
+      - chart_analysis
+
+  - name: bge_m3
+    ollama_tag: "bge-m3"
+    endpoint: "http://localhost:11434"
+    modality: embedding
+    context_length: 8192
+    capability_tags:
+      - embedding
+      - rag
+      - semantic_search
