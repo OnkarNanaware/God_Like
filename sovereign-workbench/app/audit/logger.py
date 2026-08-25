@@ -338,15 +338,20 @@ class AuditLogger:
                         f"expected '{prev_hash}', got '{recorded_prev}'"
                     )
 
-                # Re-derive self_hash
-                stored_self = rec.pop("self_hash", "")
-                canonical = json.dumps(rec, sort_keys=True, ensure_ascii=False)
+                # Re-derive self_hash: copy the record, set self_hash="" (the
+                # placeholder value used during the original hash computation),
+                # then re-serialise with the same sort_keys=True to reproduce
+                # the exact canonical string that was hashed at write time.
+                stored_self = rec.get("self_hash", "")
+                rec_for_hash = dict(rec)  # shallow copy — safe for flat JSON
+                rec_for_hash["self_hash"] = ""
+                canonical = json.dumps(rec_for_hash, sort_keys=True, ensure_ascii=False)
                 derived = _sha256_of(canonical)
                 if derived != stored_self:
                     errors.append(
                         f"Line {lineno} seq={seq}: self_hash mismatch — record may have been tampered"
                     )
-                rec["self_hash"] = stored_self  # restore
+
 
                 prev_hash = stored_self
                 expected_seq += 1
