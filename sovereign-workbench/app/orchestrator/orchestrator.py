@@ -1,0 +1,552 @@
+"""
+orchestrator/orchestrator.py
+============================
+Plan → Act → Observe → Iterate state machine.
+
+Control flow
+------------
+
+  PLANNING
+    │  LLM produces a list of tool steps (JSON).
+    ▼
+  ACTING  (for each step in plan)
+    │  Dispatch to tool from TOOL_REGISTRY.
+    ▼
+  OBSERVING
+    │  ToolResult.success=True  → accumulate output, advance to next step.
+    │  ToolResult.success=False → feed error back, increment retry counter.
+    │       retry < MAX_RETRIES → REPLANNING (re-plan from current step)
+    │       retry == MAX_RETRIES → FAILED (halt, return failure_summary)
+    ▼
+  COMPLETED  (all steps succeeded)
+    │  LLM synthesises a final answer from accumulated step outputs.
+    ▼
+  return OrchestratorRun
+
+Mockability
+-----------
+The orchestrator accepts any object satisfying ``LLMOrchestratorProtocol``
+(same structural shape as ``OllamaClient.chat_completion``).  Pass a
+``FakeOllamaClient`` in tests — no live Ollama required.
+
+Audit logging
+-------------
+Every state transition, tool dispatch, tool result, retry, and final output
+is recorded in the audit log with the same ``request_id`` that was passed
+in, so a full run is traceable as a single correlated sequence.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import uuid
+from typing import Any, Optional, Protocol, runtime_checkable
+
+from app.audit.logger import AuditLogger, EventType
+from app.orchestrator.state import (
+    OrchestratorRun,
+    OrchestratorStatus,
+    PlannedStep,
+    StepOutcome,
+)
+from app.tools.base import ToolResult
+from app.tools.registry import TOOL_REGISTRY, get_tool, list_tools
+
+_log = logging.getLogger("sovereign.orchestrator")
+
+MAX_RETRIES: int = 3  # per step — after this the run halts with FAILED
+
+
+# ---------------------------------------------------------------------------
+# Protocol — same structural contract as OllamaClient.chat_completion
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class LLMOrchestratorProtocol(Protocol):
+    async def chat_completion(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        request_id: Optional[str] = None,
+        temperature: float = ...,
+        max_tokens: int = ...,
+        extra_body: Optional[dict[str, Any]] = None,
+    ) -> Any:
+        """Must return an object with a ``.content: str`` attribute."""
+        ...
+
+
+# ---------------------------------------------------------------------------
+# Planning prompt builders
+# ---------------------------------------------------------------------------
+
+_PLANNING_SYSTEM_PROMPT = """\
+You are the planning component of an AI agent. Given a goal and a list of \
+available tools, you must produce a JSON array of steps to accomplish the goal.
+
+Available tools:
+{tools_json}
+
+Output format — a JSON array, NOTHING else:
+[
+  {{
+    "step_index": 0,
+    "tool_name": "<tool name from the list above>",
+    "tool_args": {{<keyword args matching the tool's input_schema>}},
+    "description": "<one sentence: why this step is needed>"
+  }},
+  ...
+]
+
+Rules:
+- Output only the JSON array. No prose, no markdown fences, no explanation.
+- Use only tool names that appear in the available tools list.
+- tool_args must match the required fields in each tool's input_schema.
+- Keep the plan minimal — use the fewest steps that accomplish the goal.
+""".strip()
+
+_REPLAN_SYSTEM_PROMPT = """\
+You are the re-planning component of an AI agent. A previous step failed. \
+Review the failure and produce a revised JSON array of remaining steps.
+
+Available tools:
+{tools_json}
+
+Failed step:
+  tool_name: {tool_name}
+  tool_args: {tool_args}
+  error: {error}
+
+Remaining goal context:
+{goal}
+
+Output format — a JSON array of remaining steps (same schema as before), \
+NOTHING else.
+""".strip()
+
+_SYNTHESIS_SYSTEM_PROMPT = """\
+You are the synthesis component of an AI agent. Given the original goal and \
+the outputs of all completed steps, produce a final response that directly \
+addresses the goal.
+
+Be concise. Refer to specific findings from the tool outputs where relevant.
+""".strip()
+
+
+def _tools_json_str() -> str:
+    return json.dumps(list_tools(), indent=2)
+
+
+def _build_plan_messages(goal: str) -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": _PLANNING_SYSTEM_PROMPT.format(tools_json=_tools_json_str())},
+        {"role": "user", "content": f"Goal: {goal}"},
+    ]
+
+
+def _build_replan_messages(
+    goal: str,
+    failed_step: PlannedStep,
+    error: str,
+    context: list[str],
+) -> list[dict[str, str]]:
+    context_text = "\n\n".join(context) if context else "(no prior context)"
+    return [
+        {
+            "role": "system",
+            "content": _REPLAN_SYSTEM_PROMPT.format(
+                tools_json=_tools_json_str(),
+                tool_name=failed_step.tool_name,
+                tool_args=json.dumps(failed_step.tool_args),
+                error=error,
+                goal=f"{goal}\n\nPrior context:\n{context_text}",
+            ),
+        },
+        {"role": "user", "content": "Produce the revised plan."},
+    ]
+
+
+def _build_synthesis_messages(goal: str, context: list[str]) -> list[dict[str, str]]:
+    context_text = "\n\n".join(context) if context else "(no tool outputs available)"
+    return [
+        {"role": "system", "content": _SYNTHESIS_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"Goal: {goal}\n\n"
+                f"Tool outputs:\n{context_text}\n\n"
+                f"Produce the final response."
+            ),
+        },
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Plan parsing
+# ---------------------------------------------------------------------------
+
+
+def _parse_plan(raw: str) -> list[PlannedStep]:
+    """
+    Extract a JSON array from the LLM output and parse it into ``PlannedStep`` objects.
+
+    Tolerant: strips prose/markdown fences that the model sometimes adds.
+
+    Raises
+    ------
+    ValueError  if no valid JSON array can be extracted.
+    """
+    # Strip markdown fences if present.
+    cleaned = re.sub(r"```(?:json)?\s*", "", raw, flags=re.IGNORECASE).strip()
+
+    # Find the outermost JSON array.
+    start = cleaned.find("[")
+    end = cleaned.rfind("]")
+    if start == -1 or end == -1 or end < start:
+        raise ValueError(f"No JSON array found in plan response: {raw[:300]!r}")
+
+    array_str = cleaned[start : end + 1]
+    try:
+        items: list[dict[str, Any]] = json.loads(array_str)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Plan JSON parse error: {exc} — raw: {array_str[:300]!r}") from exc
+
+    steps: list[PlannedStep] = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError(f"Plan step is not a dict: {item!r}")
+        missing = {"tool_name", "tool_args"} - item.keys()
+        if missing:
+            raise ValueError(f"Plan step missing required keys {missing}: {item!r}")
+        steps.append(
+            PlannedStep(
+                step_index=int(item.get("step_index", len(steps))),
+                tool_name=item["tool_name"],
+                tool_args=item.get("tool_args", {}),
+                description=item.get("description", ""),
+            )
+        )
+    return steps
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator
+# ---------------------------------------------------------------------------
+
+
+class Orchestrator:
+    """
+    Plan → Act → Observe → Iterate agent loop.
+
+    Parameters
+    ----------
+    llm_client:
+        Object satisfying ``LLMOrchestratorProtocol`` (``OllamaClient`` or a
+        test double).
+    audit_logger:
+        Shared ``AuditLogger`` — all steps are recorded here.
+    max_retries:
+        Maximum retry attempts per step before declaring failure.
+    """
+
+    def __init__(
+        self,
+        llm_client: LLMOrchestratorProtocol,
+        audit_logger: AuditLogger,
+        max_retries: int = MAX_RETRIES,
+    ) -> None:
+        self._llm = llm_client
+        self._audit = audit_logger
+        self._max_retries = max_retries
+
+    # ------------------------------------------------------------------
+    # Public entry point
+    # ------------------------------------------------------------------
+
+    async def run(
+        self,
+        goal: str,
+        *,
+        request_id: Optional[str] = None,
+    ) -> OrchestratorRun:
+        """
+        Execute the agent loop for the given ``goal``.
+
+        Parameters
+        ----------
+        goal:
+            Natural-language description of what the agent should accomplish.
+        request_id:
+            Correlation ID threaded through the entire run.  Generated if omitted.
+
+        Returns
+        -------
+        An ``OrchestratorRun`` with ``status == COMPLETED`` on success,
+        ``status == FAILED`` on unrecoverable failure.
+        """
+        request_id = request_id or str(uuid.uuid4())
+        run = OrchestratorRun(request_id=request_id, goal=goal)
+
+        self._log(EventType.AGENT_ACTION, run, "run_started", {"goal": goal})
+
+        # ── PLANNING ─────────────────────────────────────────────────────
+        run.status = OrchestratorStatus.PLANNING
+        try:
+            plan = await self._plan(goal, run)
+        except Exception as exc:
+            run.status = OrchestratorStatus.FAILED
+            run.failure_summary = f"Planning failed: {exc}"
+            self._log(EventType.AGENT_ACTION, run, "planning_failed", {"error": str(exc)})
+            return run
+
+        run.plan = plan
+        self._log(
+            EventType.AGENT_ACTION,
+            run,
+            "plan_produced",
+            {
+                "step_count": len(plan),
+                "steps": [
+                    {"step_index": s.step_index, "tool_name": s.tool_name, "description": s.description}
+                    for s in plan
+                ],
+            },
+        )
+
+        if not plan:
+            # Empty plan — model decided no tools are needed. Synthesise directly.
+            run.status = OrchestratorStatus.COMPLETED
+            run.final_output = await self._synthesise(goal, run)
+            self._log(EventType.AGENT_ACTION, run, "completed_no_tools", {})
+            return run
+
+        # ── ACT / OBSERVE / RETRY loop ────────────────────────────────────
+        step_index = 0
+        while step_index < len(run.plan):
+            step = run.plan[step_index]
+            attempt = 0
+            step_done = False
+
+            while not step_done and attempt < self._max_retries:
+                attempt += 1
+                run.status = OrchestratorStatus.ACTING
+
+                # Dispatch tool
+                result = await self._act(step, run, attempt)
+
+                # Observe
+                run.status = OrchestratorStatus.OBSERVING
+                outcome = StepOutcome(
+                    step_index=step.step_index,
+                    tool_name=step.tool_name,
+                    tool_args=step.tool_args,
+                    success=result.success,
+                    output=result.output,
+                    error=result.error,
+                    attempt=attempt,
+                )
+                run.outcomes.append(outcome)
+
+                self._log(
+                    EventType.TOOL_CALL,
+                    run,
+                    "tool_observed",
+                    {
+                        "tool_name": step.tool_name,
+                        "step_index": step.step_index,
+                        "attempt": attempt,
+                        "success": result.success,
+                        "error": result.error,
+                    },
+                )
+
+                if result.success:
+                    # Accumulate output snippet for context.
+                    snippet = (
+                        f"[Step {step.step_index} — {step.tool_name}]:\n"
+                        f"{str(result.output)[:4000]}"
+                    )
+                    run.context_snippets.append(snippet)
+                    step_done = True
+
+                else:
+                    # Failure path
+                    if attempt < self._max_retries:
+                        run.status = OrchestratorStatus.REPLANNING
+                        self._log(
+                            EventType.AGENT_ACTION,
+                            run,
+                            "retry_triggered",
+                            {
+                                "step_index": step.step_index,
+                                "tool_name": step.tool_name,
+                                "attempt": attempt,
+                                "error": result.error,
+                            },
+                        )
+                        # Re-plan: replace the current step and everything after it.
+                        try:
+                            revised = await self._replan(goal, step, result.error or "unknown error", run)
+                            run.plan = run.plan[:step_index] + revised
+                            # Restart the step with the revised plan.
+                            step = run.plan[step_index]
+                        except Exception as exc:
+                            # Re-plan itself failed — treat as a retry of the same step.
+                            _log.warning("Re-plan failed (request_id=%s): %s", request_id, exc)
+                    else:
+                        # Exhausted retries for this step.
+                        run.status = OrchestratorStatus.FAILED
+                        run.failure_summary = (
+                            f"Step {step.step_index} ('{step.tool_name}') failed "
+                            f"after {self._max_retries} attempts.  "
+                            f"Last error: {result.error}"
+                        )
+                        self._log(
+                            EventType.AGENT_ACTION,
+                            run,
+                            "step_exhausted",
+                            {
+                                "step_index": step.step_index,
+                                "tool_name": step.tool_name,
+                                "max_retries": self._max_retries,
+                                "last_error": result.error,
+                            },
+                        )
+                        return run
+
+            step_index += 1
+
+        # ── SYNTHESIS ─────────────────────────────────────────────────────
+        run.status = OrchestratorStatus.COMPLETED
+        run.final_output = await self._synthesise(goal, run)
+        self._log(
+            EventType.AGENT_ACTION,
+            run,
+            "run_completed",
+            {"final_output_length": len(run.final_output or "")},
+        )
+        return run
+
+    # ------------------------------------------------------------------
+    # Internal phases
+    # ------------------------------------------------------------------
+
+    async def _plan(self, goal: str, run: OrchestratorRun) -> list[PlannedStep]:
+        """Ask the LLM to decompose ``goal`` into a list of tool steps."""
+        messages = _build_plan_messages(goal)
+        resp = await self._llm.chat_completion(
+            messages,
+            request_id=run.request_id,
+            temperature=0.0,
+            max_tokens=1024,
+        )
+        return _parse_plan(resp.content)
+
+    async def _replan(
+        self,
+        goal: str,
+        failed_step: PlannedStep,
+        error: str,
+        run: OrchestratorRun,
+    ) -> list[PlannedStep]:
+        """Ask the LLM for a revised plan starting from the failed step."""
+        messages = _build_replan_messages(goal, failed_step, error, run.context_snippets)
+        resp = await self._llm.chat_completion(
+            messages,
+            request_id=run.request_id,
+            temperature=0.0,
+            max_tokens=1024,
+        )
+        return _parse_plan(resp.content)
+
+    async def _act(
+        self,
+        step: PlannedStep,
+        run: OrchestratorRun,
+        attempt: int,
+    ) -> ToolResult:
+        """Dispatch the planned step to the appropriate tool."""
+        tool = get_tool(step.tool_name)
+        if tool is None:
+            return ToolResult(
+                success=False,
+                output=None,
+                error=(
+                    f"Unknown tool '{step.tool_name}'.  "
+                    f"Available tools: {list(TOOL_REGISTRY)}"
+                ),
+            )
+
+        self._log(
+            EventType.TOOL_CALL,
+            run,
+            "tool_dispatched",
+            {
+                "tool_name": step.tool_name,
+                "step_index": step.step_index,
+                "attempt": attempt,
+                "tool_args": step.tool_args,
+            },
+        )
+
+        try:
+            result = await tool.execute(**step.tool_args)
+        except Exception as exc:
+            # The tool contract says execute() never raises, but we guard here
+            # defensively — a bug in the tool must not crash the orchestrator.
+            _log.exception(
+                "Tool '%s' raised unexpectedly (request_id=%s, attempt=%d): %s",
+                step.tool_name,
+                run.request_id,
+                attempt,
+                exc,
+            )
+            result = ToolResult(
+                success=False,
+                output=None,
+                error=f"Tool raised unexpectedly: {type(exc).__name__}: {exc}",
+            )
+        return result
+
+    async def _synthesise(self, goal: str, run: OrchestratorRun) -> str:
+        """Ask the LLM to produce a final answer from accumulated step outputs."""
+        if not run.context_snippets:
+            return "No tool outputs were collected — the plan produced no results."
+
+        messages = _build_synthesis_messages(goal, run.context_snippets)
+        try:
+            resp = await self._llm.chat_completion(
+                messages,
+                request_id=run.request_id,
+                temperature=0.3,
+                max_tokens=2048,
+            )
+            return resp.content
+        except Exception as exc:
+            _log.warning("Synthesis call failed (request_id=%s): %s", run.request_id, exc)
+            return (
+                f"Synthesis step failed ({exc}).  Raw tool outputs:\n\n"
+                + "\n\n".join(run.context_snippets)
+            )
+
+    # ------------------------------------------------------------------
+    # Audit helper
+    # ------------------------------------------------------------------
+
+    def _log(
+        self,
+        event_type: EventType,
+        run: OrchestratorRun,
+        action: str,
+        extra: dict[str, Any],
+    ) -> None:
+        payload: dict[str, Any] = {
+            "action": action,
+            "status": run.status.value,
+            "goal_preview": run.goal[:120],
+        }
+        payload.update(extra)
+        self._audit.log_event(event_type, request_id=run.request_id, payload=payload)
