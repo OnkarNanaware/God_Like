@@ -127,7 +127,8 @@ def test_health_check(test_app):
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "ok"
-    assert data["phase"] == "A"
+    # Phase string advances with each phase (A, B, C …) — accept any non-empty value.
+    assert data["phase"]
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +148,13 @@ def test_chat_returns_valid_response(test_app):
 
     data = resp.json()
     assert data["request_id"] == request_id
-    assert data["ollama_tag"] == "qwen2.5:14b-instruct-q4_K_M"
+    # ollama_tag is dynamic — GPU tier resolver selects the best available model.
+    # Verify it is a non-empty string from the registry rather than a hardcoded tag.
+    from app.models.ollama_client import MODEL_REGISTRY
+    known_tags = {entry["ollama_tag"] for entry in MODEL_REGISTRY.values()}
+    assert data["ollama_tag"] in known_tags, (
+        f"Unexpected ollama_tag '{data['ollama_tag']}' — not in registry"
+    )
     assert len(data["content"]) > 0
     assert data["usage"]["total_tokens"] > 0
 
@@ -169,10 +176,10 @@ def test_audit_log_records_model_call(test_app, tmp_audit_log: Path):
     model_calls = [r for r in records if r["event_type"] == "model_call"]
     assert len(model_calls) >= 1, "Expected at least one model_call record in audit log"
 
+    # The resolved model may vary by hardware (tier resolver); match by request_id only.
     matching = [
         r for r in model_calls
-        if r["payload"]["model_name"] == "qwen25_14b_instruct"
-        and r["request_id"] == request_id
+        if r["request_id"] == request_id
     ]
     assert len(matching) == 1, (
         f"Expected exactly 1 audit record for request_id={request_id}, got {len(matching)}"

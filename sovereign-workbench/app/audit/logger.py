@@ -62,6 +62,7 @@ class EventType(str, Enum):
     AGENT_ACTION = "agent_action"
     STARTUP = "startup"
     ERROR = "error"
+    RAG_INGEST = "rag_ingest"
 
 
 @dataclass

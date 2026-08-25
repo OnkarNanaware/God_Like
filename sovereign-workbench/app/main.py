@@ -3,13 +3,14 @@ app/main.py
 ===========
 Sovereign Workbench — FastAPI application entrypoint.
 
-Phase A:  /chat endpoint backed by the default text model.
+Phases A-C:  /chat, /ingest, /rag/search endpoints.
 
 Network sovereignty
 -------------------
 * No external HTTP calls are made at startup or during request handling.
 * The OllamaClient validates at import time that all configured endpoints
   resolve to localhost.
+* Qdrant is accessed at localhost:6333 only.
 * Lifespan events close the HTTP client cleanly on shutdown.
 """
 
@@ -19,6 +20,7 @@ import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
 from fastapi import FastAPI, HTTPException, Request, status
@@ -51,10 +53,15 @@ _log = logging.getLogger("sovereign.main")
 
 _audit_logger: AuditLogger | None = None
 _default_client: OllamaClient | None = None
+_embedding_client: OllamaClient | None = None
 
-# The model used by the Phase-A /chat endpoint.
-# Phase B will replace this with router-selected models.
+# Phase C singletons
+_ingestor: Any | None = None   # app.rag.ingestor.Ingestor
+_vector_store: Any | None = None  # app.rag.store.VectorStore
+
+# The model used by the /chat endpoint — resolved at startup by tier_resolver.
 _DEFAULT_MODEL_NAME = os.environ.get("DEFAULT_MODEL", "qwen25_14b_instruct")
+_EMBEDDING_MODEL_NAME = "bge_m3"
 
 
 # ---------------------------------------------------------------------------
@@ -64,26 +71,96 @@ _DEFAULT_MODEL_NAME = os.environ.get("DEFAULT_MODEL", "qwen25_14b_instruct")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    global _audit_logger, _default_client
+    global _audit_logger, _default_client, _embedding_client, _ingestor, _vector_store
 
+    # ── Audit logger ───────────────────────────────────────────────────
     _audit_logger = AuditLogger()
     _log.info("AuditLogger initialised — log path: %s", _audit_logger._path)
 
+    # ── GPU-adaptive model selection ───────────────────────────────────
+    try:
+        from app.hardware.tier_resolver import resolve_startup_models
+        resolved = resolve_startup_models(audit_logger=_audit_logger)
+        # Map modality → model_name; prefer "text" modality for default chat.
+        text_model = resolved.get("text", _DEFAULT_MODEL_NAME)
+        # Only override if that model is actually in the registry.
+        if text_model in MODEL_REGISTRY:
+            actual_default = text_model
+            _log.info("GPU tier resolver selected default text model: %s", actual_default)
+        else:
+            actual_default = _DEFAULT_MODEL_NAME
+            _log.warning(
+                "Resolved model '%s' not in registry — falling back to %s",
+                text_model,
+                actual_default,
+            )
+    except Exception as exc:  # noqa: BLE001 — resolver failure must not crash startup
+        actual_default = _DEFAULT_MODEL_NAME
+        _log.warning("Tier resolver failed (%s) — using default model: %s", exc, actual_default)
+
+    # ── Default LLM client ─────────────────────────────────────────────
     _default_client = OllamaClient(
-        model_name=_DEFAULT_MODEL_NAME,
+        model_name=actual_default,
         audit_logger=_audit_logger,
     )
     _log.info(
         "Default model: %s (%s)",
-        _DEFAULT_MODEL_NAME,
+        actual_default,
         _default_client.ollama_tag,
     )
+
+    # ── Embedding client (bge-m3) ──────────────────────────────────────
+    if _EMBEDDING_MODEL_NAME in MODEL_REGISTRY:
+        _embedding_client = OllamaClient(
+            model_name=_EMBEDDING_MODEL_NAME,
+            audit_logger=_audit_logger,
+        )
+        _log.info("Embedding model: %s (%s)", _EMBEDDING_MODEL_NAME, _embedding_client.ollama_tag)
+    else:
+        _log.warning(
+            "Embedding model '%s' not found in registry — /ingest and /rag/search unavailable",
+            _EMBEDDING_MODEL_NAME,
+        )
+
+    # ── Qdrant vector store + Ingestor ─────────────────────────────────
+    if _embedding_client is not None:
+        try:
+            from app.rag.embedder import Embedder
+            from app.rag.ingestor import Ingestor
+            from app.rag.store import VectorStore
+            from app.tools.rag_search import RagSearchTool
+            from app.tools.registry import register_tool
+
+            _vector_store = VectorStore()          # localhost:6333
+            embedder = Embedder(_embedding_client)
+            _ingestor = Ingestor(
+                embedder=embedder,
+                store=_vector_store,
+                audit_logger=_audit_logger,
+            )
+            # Register the RAG search tool with the orchestrator's registry.
+            register_tool(RagSearchTool(store=_vector_store, embedder=embedder))
+            _log.info("RAG pipeline ready (Qdrant + bge-m3)")
+        except ImportError as exc:
+            _log.warning(
+                "RAG dependencies not installed (%s) — /ingest and /rag/search disabled.  "
+                "Run: pip install qdrant-client pymupdf",
+                exc,
+            )
+        except Exception as exc:  # noqa: BLE001 — Qdrant may not be running in dev
+            _log.warning(
+                "Qdrant not reachable at startup (%s) — "
+                "/ingest and /rag/search will fail at request time",
+                exc,
+            )
 
     yield  # ← application runs here
 
     # Shutdown
     if _default_client is not None:
         await _default_client.aclose()
+    if _embedding_client is not None:
+        await _embedding_client.aclose()
     _log.info("Sovereign Workbench shut down cleanly.")
 
 
@@ -98,9 +175,8 @@ app = FastAPI(
         "All inference runs on localhost via Ollama.  "
         "No external network calls are made at any time."
     ),
-    version="0.1.0-phase-a",
+    version="0.1.0-phase-c",
     lifespan=lifespan,
-    # Disable OpenAPI docs telemetry — FastAPI itself has none, but be explicit.
     docs_url="/docs",
     redoc_url="/redoc",
 )
@@ -167,6 +243,52 @@ class ChatResponse(BaseModel):
     usage: ChatResponseUsage
 
 
+# ── Phase C schemas ────────────────────────────────────────────────────────
+
+
+class IngestRequest(BaseModel):
+    source_path: str = Field(
+        ...,
+        description="Absolute (or cwd-relative) path to the file to ingest.",
+    )
+    collection: str = Field(
+        default="docs",
+        description="Target Qdrant collection name (caller-controlled namespace).",
+    )
+    request_id: Optional[str] = Field(default=None, description="Audit correlation ID.")
+
+
+class IngestResponse(BaseModel):
+    request_id: str
+    source_path: str
+    collection: str
+    chunks_ingested: int
+    source_sha256: str
+    duration_ms: float
+
+
+class RagSearchRequest(BaseModel):
+    query: str = Field(..., description="Natural-language query.")
+    collection: str = Field(default="docs", description="Target Qdrant collection.")
+    top_k: int = Field(default=5, ge=1, le=20, description="Max results.")
+    request_id: Optional[str] = Field(default=None)
+
+
+class RagSearchResult(BaseModel):
+    score: float
+    text: str
+    source: str
+    chunk_id: str
+    collection: str
+
+
+class RagSearchResponse(BaseModel):
+    request_id: str
+    collection: str
+    query: str
+    results: list[RagSearchResult]
+
+
 # ---------------------------------------------------------------------------
 # Dependency helpers
 # ---------------------------------------------------------------------------
@@ -182,13 +304,9 @@ def _get_or_create_client(model_name: str) -> OllamaClient:
     """
     Return the default client for the default model, or create a short-lived
     client for a caller-specified model.
-
-    Phase B will replace this with a proper client pool / router.
     """
     if model_name == _DEFAULT_MODEL_NAME and _default_client is not None:
         return _default_client
-    # Caller requested a non-default model — create a transient client.
-    # (Acceptable for Phase A; Phase B will add a client pool.)
     return OllamaClient(
         model_name=model_name,
         audit_logger=_get_audit_logger(),
@@ -196,7 +314,7 @@ def _get_or_create_client(model_name: str) -> OllamaClient:
 
 
 # ---------------------------------------------------------------------------
-# Routes
+# Routes — Meta
 # ---------------------------------------------------------------------------
 
 
@@ -206,7 +324,8 @@ async def health_check() -> dict[str, str]:
     Liveness probe.  Does NOT ping Ollama — this is intentional so the
     workbench itself stays up even when a model is being loaded.
     """
-    return {"status": "ok", "phase": "A"}
+    rag_status = "ready" if _ingestor is not None else "unavailable"
+    return {"status": "ok", "phase": "C", "rag": rag_status}
 
 
 @app.get("/models", tags=["Meta"])
@@ -215,10 +334,22 @@ async def list_models() -> dict[str, Any]:
     return {"models": list(MODEL_REGISTRY.values())}
 
 
+@app.get("/tools", tags=["Meta"])
+async def list_tools_endpoint() -> dict[str, Any]:
+    """Return all registered tools and their input schemas."""
+    from app.tools.registry import list_tools
+    return {"tools": list_tools()}
+
+
+# ---------------------------------------------------------------------------
+# Routes — Inference (/chat)
+# ---------------------------------------------------------------------------
+
+
 @app.post("/chat", tags=["Inference"], response_model=ChatResponse)
 async def chat(request: ChatRequest, raw_request: Request) -> Any:
     """
-    Phase A main endpoint.
+    Main chat endpoint.
 
     Accepts a conversation history and returns a model response from the
     locally-running Ollama instance.  No data leaves the host.
@@ -262,9 +393,7 @@ async def chat(request: ChatRequest, raw_request: Request) -> Any:
             detail={"error": "client_init_failed", "message": str(exc), "request_id": request_id},
         )
 
-    # -----------------------------------------------------------------------
-    # Streaming path
-    # -----------------------------------------------------------------------
+    # ── Streaming path ─────────────────────────────────────────────────
     if request.stream:
         async def _sse_generator() -> AsyncGenerator[str, None]:
             try:
@@ -291,9 +420,7 @@ async def chat(request: ChatRequest, raw_request: Request) -> Any:
             },
         )
 
-    # -----------------------------------------------------------------------
-    # Non-streaming path
-    # -----------------------------------------------------------------------
+    # ── Non-streaming path ─────────────────────────────────────────────
     try:
         result = await client.chat_completion(
             messages,
@@ -340,6 +467,154 @@ async def chat(request: ChatRequest, raw_request: Request) -> Any:
             total_tokens=result.total_tokens,
             latency_ms=result.latency_ms,
         ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Routes — RAG (/ingest, /rag/search)
+# ---------------------------------------------------------------------------
+
+
+@app.post("/ingest", tags=["RAG"], response_model=IngestResponse)
+async def ingest_document(request: IngestRequest) -> IngestResponse:
+    """
+    Ingest a document into the local Qdrant vector store.
+
+    Supported formats: PDF, plain text, Markdown, and common source-code
+    extensions (.py, .js, .ts, .go, .java, .cpp, .c, …).
+
+    The file is chunked (512-char sliding window, 64-char overlap), embedded
+    with bge-m3 via Ollama, and upserted into the specified Qdrant collection.
+    A ``rag_ingest`` audit record is written on success.
+
+    Raises 503 if the RAG pipeline is not initialised (Qdrant/bge-m3 not ready).
+    """
+    if _ingestor is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error": "rag_not_ready",
+                "message": (
+                    "RAG pipeline not initialised.  "
+                    "Ensure Qdrant is running (docker run -p 6333:6333 qdrant/qdrant) "
+                    "and qdrant-client + pymupdf are installed."
+                ),
+            },
+        )
+
+    request_id = request.request_id or str(uuid.uuid4())
+
+    try:
+        result = await _ingestor.ingest(
+            source_path=request.source_path,
+            collection=request.collection,
+            request_id=request_id,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "file_not_found",
+                "message": str(exc),
+                "request_id": request_id,
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error": "ingestion_failed",
+                "message": str(exc),
+                "request_id": request_id,
+            },
+        )
+    except Exception as exc:
+        _get_audit_logger().log_error(
+            request_id=request_id,
+            error_type=type(exc).__name__,
+            message=str(exc),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "ingestion_error",
+                "message": str(exc),
+                "request_id": request_id,
+            },
+        )
+
+    return IngestResponse(
+        request_id=result.request_id,
+        source_path=result.source_path,
+        collection=result.collection,
+        chunks_ingested=result.chunks_ingested,
+        source_sha256=result.source_sha256,
+        duration_ms=result.duration_ms,
+    )
+
+
+@app.post("/rag/search", tags=["RAG"], response_model=RagSearchResponse)
+async def rag_search(request: RagSearchRequest) -> RagSearchResponse:
+    """
+    Semantic search over the local Qdrant knowledge base.
+
+    The query is embedded with bge-m3, then the ``top_k`` most similar
+    chunks are returned with their similarity scores and source paths.
+
+    Raises 503 if the RAG pipeline is not initialised.
+    """
+    if _vector_store is None or _embedding_client is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error": "rag_not_ready",
+                "message": (
+                    "RAG pipeline not initialised.  "
+                    "Ensure Qdrant is running and dependencies are installed."
+                ),
+            },
+        )
+
+    request_id = request.request_id or str(uuid.uuid4())
+
+    try:
+        from app.rag.embedder import Embedder
+        embedder = Embedder(_embedding_client)
+        query_vector = await embedder.embed_one(request.query.strip(), request_id=request_id)
+        results = _vector_store.search(
+            collection=request.collection,
+            query_vector=query_vector,
+            top_k=request.top_k,
+        )
+    except Exception as exc:
+        _get_audit_logger().log_error(
+            request_id=request_id,
+            error_type=type(exc).__name__,
+            message=str(exc),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "search_error",
+                "message": str(exc),
+                "request_id": request_id,
+            },
+        )
+
+    return RagSearchResponse(
+        request_id=request_id,
+        collection=request.collection,
+        query=request.query,
+        results=[
+            RagSearchResult(
+                score=r.score,
+                text=r.text,
+                source=r.source,
+                chunk_id=r.chunk_id,
+                collection=r.collection,
+            )
+            for r in results
+        ],
     )
 
 
