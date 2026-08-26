@@ -57,6 +57,7 @@ _log = logging.getLogger("sovereign.main")
 _audit_logger: AuditLogger | None = None
 _default_client: OllamaClient | None = None
 _embedding_client: OllamaClient | None = None
+_vision_client: OllamaClient | None = None  # Phase D — VisionExtractTool
 
 # Phase C singletons
 _ingestor: Any | None = None   # app.rag.ingestor.Ingestor
@@ -65,6 +66,7 @@ _vector_store: Any | None = None  # app.rag.store.VectorStore
 # The model used by the /chat endpoint — resolved at startup by tier_resolver.
 _DEFAULT_MODEL_NAME = os.environ.get("DEFAULT_MODEL", "qwen25_14b_instruct")
 _EMBEDDING_MODEL_NAME = "bge_m3"
+_DEFAULT_VISION_MODEL_NAME = "qwen25vl_3b"
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +76,8 @@ _EMBEDDING_MODEL_NAME = "bge_m3"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    global _audit_logger, _default_client, _embedding_client, _ingestor, _vector_store
+    global _audit_logger, _default_client, _embedding_client, _vision_client, _ingestor, _vector_store
+    resolved: dict = {}  # populated by tier resolver; safe default for scope
 
     # ── Audit logger ───────────────────────────────────────────────────
     _audit_logger = AuditLogger()
@@ -98,6 +101,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 actual_default,
             )
     except Exception as exc:  # noqa: BLE001 — resolver failure must not crash startup
+        resolved = {}
         actual_default = _DEFAULT_MODEL_NAME
         _log.warning("Tier resolver failed (%s) — using default model: %s", exc, actual_default)
 
@@ -152,6 +156,33 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             )
             _log.info("RAG pipeline ready (Qdrant + bge-m3) — rag_search tool registered")
 
+            # ── Vision client + VisionExtractTool (Phase D) ────────────
+            # Resolve the vision model from the tier resolver output; fall
+            # back to the small 3b vision model if the resolver did not
+            # select one (e.g. CPU-only / low-VRAM machine).
+            from app.tools.vision_extract import VisionExtractTool
+            vision_model_name = resolved.get("vision", _DEFAULT_VISION_MODEL_NAME)
+            if vision_model_name not in MODEL_REGISTRY:
+                vision_model_name = _DEFAULT_VISION_MODEL_NAME
+                _log.warning(
+                    "Resolved vision model not in registry — falling back to %s",
+                    vision_model_name,
+                )
+            _vision_client = OllamaClient(
+                model_name=vision_model_name,
+                audit_logger=_audit_logger,
+            )
+            register_tool(
+                VisionExtractTool(
+                    llm_client=_vision_client,
+                    audit_logger=_audit_logger,
+                )
+            )
+            _log.info(
+                "Vision pipeline ready (%s) — vision_extract tool registered",
+                vision_model_name,
+            )
+
         except ImportError as exc:
             _log.warning(
                 "RAG dependencies not installed (%s) — /ingest and /rag/search disabled.  "
@@ -172,6 +203,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await _default_client.aclose()
     if _embedding_client is not None:
         await _embedding_client.aclose()
+    if _vision_client is not None:
+        await _vision_client.aclose()
     _log.info("Sovereign Workbench shut down cleanly.")
 
 
