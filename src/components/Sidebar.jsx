@@ -1,100 +1,179 @@
-import React, { useMemo, useState } from 'react'
+import React, { useState, useMemo } from 'react'
+import {
+  LogoIcon,
+  PlusIcon,
+  SearchIcon,
+  ChatBubbleIcon,
+  SettingsIcon,
+  KeyboardIcon,
+  HelpIcon
+} from './Icons'
 
-export default function Sidebar({ open, onToggle, conversations, onNewChat, onSelect, onOpenSettings, onOpenProfile }) {
-  const [query, setQuery] = useState('')
+export default function Sidebar({
+  open = true,
+  conversations = [],
+  activeId,
+  onSelect,
+  onNewChat,
+  onOpenSettings,
+  onOpenProfile
+}) {
+  const [searchQuery, setSearchQuery] = useState('')
 
-  const groups = useMemo(() => {
+  const grouped = useMemo(() => {
     const today = []
     const yesterday = []
     const older = []
     const now = new Date()
+
     conversations.forEach(c => {
-      const d = new Date(c.createdAt)
-      const diff = (now - d) / (1000 * 60 * 60 * 24)
-      if (diff < 1) today.push(c)
-      else if (diff < 2) yesterday.push(c)
-      else older.push(c)
+      if (c.group === 'Today') {
+        today.push(c)
+      } else if (c.group === 'Yesterday') {
+        yesterday.push(c)
+      } else if (c.group === 'Previous 7 days') {
+        older.push(c)
+      } else {
+        const d = new Date(c.createdAt || Date.now())
+        const diffDays = (now - d) / (1000 * 60 * 60 * 24)
+        if (diffDays < 1) today.push(c)
+        else if (diffDays < 2) yesterday.push(c)
+        else older.push(c)
+      }
     })
+
     return { today, yesterday, older }
   }, [conversations])
 
-  const filtered = (arr) => arr.filter(c => c.title.toLowerCase().includes(query.toLowerCase()))
+  const filterList = list => {
+    if (!searchQuery.trim()) return list
+    const q = searchQuery.toLowerCase()
+    return list.filter(c => c.title.toLowerCase().includes(q))
+  }
+
+  const todayList = filterList(grouped.today)
+  const yesterdayList = filterList(grouped.yesterday)
+  const olderList = filterList(grouped.older)
 
   return (
-    <aside className={`sidebar ${open ? 'open' : 'closed'}`} aria-hidden={!open}>
-      <div className="sidebar-top">
-        <div style={{display:'flex',alignItems:'center',gap:12}}>
-          <div className="brand" onClick={() => onSelect(conversations[0]?.id)}>
-            <img src="/assets/sara-logo-placeholder.svg" alt="Sa-Ra AI" className="logo-img" />
-            <div className="title">Sa-Ra AI</div>
-          </div>
-        </div>
-        <div style={{display:'flex',gap:8}}>
-          <button className="hamburger" onClick={onToggle} aria-label="Toggle sidebar">☰</button>
+    <aside className={`sidebar ${open ? 'open' : 'closed'}`} aria-label="Sidebar">
+      {/* Brand Header - Clean without extra pencil icon */}
+      <div className="sidebar-header">
+        <div className="brand-wrapper" onClick={() => onSelect(conversations[0]?.id)}>
+          <LogoIcon size={22} />
+          <span className="brand-title">Sa-Ra AI</span>
         </div>
       </div>
 
-      <div className="sidebar-actions" style={{marginTop:12}}>
-        <button className="btn new-chat" onClick={onNewChat}>+ New chat</button>
-        <button className="icon-btn" title="Open list">≡</button>
+      {/* Action Row */}
+      <div className="sidebar-new-chat-row">
+        <button className="btn-new-chat" onClick={onNewChat}>
+          <PlusIcon size={14} />
+          <span>New chat</span>
+        </button>
       </div>
 
-      <div className="search" style={{marginTop:12}}>
-        <input aria-label="Search conversations" placeholder="Search chats..." value={query} onChange={e => setQuery(e.target.value)} />
+      {/* Search Bar */}
+      <div className="sidebar-search">
+        <span className="sidebar-search-icon">
+          <SearchIcon size={13} />
+        </span>
+        <input
+          type="text"
+          placeholder="Search chats..."
+          value={searchQuery}
+          onChange={e => setSearchQuery(e.target.value)}
+        />
       </div>
 
-      <nav className="conversations" aria-label="Conversations">
-        {filtered(groups.today).length > 0 && (
-          <div className="group">
-            <div className="group-title">Today</div>
-            {filtered(groups.today).map(c => (
-              <div key={c.id} className="conv" onClick={() => onSelect(c.id)}>
-                <div className="conv-left"><div className="icon">💬</div><div>{c.title}</div></div>
-                <div className="three">⋯</div>
-              </div>
+      {/* History List */}
+      <div className="sidebar-history">
+        {todayList.length > 0 && (
+          <div className="history-group">
+            <div className="history-group-title">Today</div>
+            {todayList.map(c => (
+              <button
+                key={c.id}
+                className={`history-item ${c.id === activeId ? 'active' : ''}`}
+                onClick={() => onSelect(c.id)}
+              >
+                <div className="history-item-left">
+                  <span className="history-item-icon">
+                    <ChatBubbleIcon size={14} />
+                  </span>
+                  <span className="history-item-title">{c.title}</span>
+                </div>
+                <span className="history-item-dots">⋯</span>
+              </button>
             ))}
           </div>
         )}
 
-        {filtered(groups.yesterday).length > 0 && (
-          <div className="group">
-            <div className="group-title">Yesterday</div>
-            {filtered(groups.yesterday).map(c => (
-              <div key={c.id} className="conv" onClick={() => onSelect(c.id)}>
-                <div className="conv-left"><div className="icon">💬</div><div>{c.title}</div></div>
-                <div className="three">⋯</div>
-              </div>
+        {yesterdayList.length > 0 && (
+          <div className="history-group">
+            <div className="history-group-title">Yesterday</div>
+            {yesterdayList.map(c => (
+              <button
+                key={c.id}
+                className={`history-item ${c.id === activeId ? 'active' : ''}`}
+                onClick={() => onSelect(c.id)}
+              >
+                <div className="history-item-left">
+                  <span className="history-item-icon">
+                    <ChatBubbleIcon size={14} />
+                  </span>
+                  <span className="history-item-title">{c.title}</span>
+                </div>
+                <span className="history-item-dots">⋯</span>
+              </button>
             ))}
           </div>
         )}
 
-        {filtered(groups.older).length > 0 && (
-          <div className="group">
-            <div className="group-title">Previous 7 days</div>
-            {filtered(groups.older).map(c => (
-              <div key={c.id} className="conv" onClick={() => onSelect(c.id)}>
-                <div className="conv-left"><div className="icon">💬</div><div>{c.title}</div></div>
-                <div className="three">⋯</div>
-              </div>
+        {olderList.length > 0 && (
+          <div className="history-group">
+            <div className="history-group-title">Previous 7 days</div>
+            {olderList.map(c => (
+              <button
+                key={c.id}
+                className={`history-item ${c.id === activeId ? 'active' : ''}`}
+                onClick={() => onSelect(c.id)}
+              >
+                <div className="history-item-left">
+                  <span className="history-item-icon">
+                    <ChatBubbleIcon size={14} />
+                  </span>
+                  <span className="history-item-title">{c.title}</span>
+                </div>
+                <span className="history-item-dots">⋯</span>
+              </button>
             ))}
           </div>
         )}
-      </nav>
+      </div>
 
-      <div className="sidebar-bottom">
-        <div style={{display:'flex',flexDirection:'column',gap:6}}>
-          <button className="link">Settings</button>
-          <button className="link">Keyboard shortcuts</button>
-          <button className="link">Help & FAQ</button>
-        </div>
+      {/* Footer Links & User Profile */}
+      <div className="sidebar-footer">
+        <button className="sidebar-link" onClick={onOpenSettings}>
+          <SettingsIcon size={16} />
+          <span>Settings</span>
+        </button>
+        <button className="sidebar-link" onClick={() => alert('Keyboard shortcuts:\nEnter: Send message\nShift+Enter: New line')}>
+          <KeyboardIcon size={16} />
+          <span>Keyboard shortcuts</span>
+        </button>
+        <button className="sidebar-link" onClick={() => alert('Sa-Ra AI Help & Documentation')}>
+          <HelpIcon size={16} />
+          <span>Help & FAQ</span>
+        </button>
 
-        <div className="sidebar-user">
+        <div className="sidebar-user" onClick={onOpenProfile}>
           <div className="avatar-circle">U</div>
-          <div style={{flex:1}}>
-            <div style={{color:'#eaf1ff',fontWeight:700}}>User</div>
-            <a href="mailto:user@example.com" style={{color:'var(--muted)',fontSize:13,textDecoration:'none'}}>user@example.com</a>
+          <div className="user-info">
+            <div className="user-name">User</div>
+            <div className="user-email">user@example.com</div>
           </div>
-          <div className="three">⋯</div>
+          <span style={{ color: 'var(--text-dim)', fontSize: 16 }}>⋯</span>
         </div>
       </div>
     </aside>

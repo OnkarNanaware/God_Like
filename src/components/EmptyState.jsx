@@ -1,17 +1,66 @@
 import React from 'react'
+import {
+  GraduationCapIcon,
+  PencilIcon,
+  CalendarIcon,
+  ChartIcon,
+  MoreDotsIcon
+} from './Icons'
 
-export default function EmptyState() {
+export default function EmptyState({ onSelectSuggestion }) {
+  const suggestions = [
+    {
+      icon: <GraduationCapIcon size={18} />,
+      action: 'Explain',
+      topic: 'quantum computing',
+      prompt: 'Explain quantum computing in simple terms with real-world examples.'
+    },
+    {
+      icon: <PencilIcon size={18} />,
+      action: 'Write',
+      topic: 'a cover letter',
+      prompt: 'Write a professional cover letter for a Senior Software Engineer role.'
+    },
+    {
+      icon: <CalendarIcon size={18} />,
+      action: 'Help me',
+      topic: 'plan my day',
+      prompt: 'Help me plan my day with focused deep-work blocks.'
+    },
+    {
+      icon: <ChartIcon size={18} />,
+      action: 'Analyze',
+      topic: 'this data',
+      prompt: 'Check wall thinning on PV-101 (8.4mm) against SOP-128.'
+    },
+    {
+      icon: <MoreDotsIcon size={18} />,
+      action: 'More',
+      topic: '',
+      prompt: 'Summarize SOx reduction targets from MRPL Sustainability Report 2024.'
+    }
+  ]
+
   return (
-    <div className="empty-state">
-      <div className="moon-visual" aria-hidden />
-      <h1>SARA-AI</h1>
-      <p className="lead">How can I help you today?<br/>Ask, create, analyze, or research.</p>
-      <div className="suggestions">
-        <button className="chip"><strong>Explain</strong><div className="sub">quantum computing</div></button>
-        <button className="chip"><strong>Write</strong><div className="sub">a cover letter</div></button>
-        <button className="chip"><strong>Help me</strong><div className="sub">plan my day</div></button>
-        <button className="chip"><strong>Analyze</strong><div className="sub">this data</div></button>
-        <button className="chip"><strong>More</strong><div className="sub">&nbsp;</div></button>
+    <div className="home-empty-container">
+      <h1 className="home-hero-title">SARA-AI</h1>
+      <div className="home-hero-subtitle">How can I help you today?</div>
+      <div className="home-hero-desc">Ask, create, analyze, or research.</div>
+
+      <div className="suggestions-row">
+        {suggestions.map((item, idx) => (
+          <div
+            key={idx}
+            className="suggestion-chip"
+            onClick={() => onSelectSuggestion && onSelectSuggestion(item.prompt)}
+          >
+            <div className="chip-icon-wrapper">{item.icon}</div>
+            <div className="chip-text">
+              <span className="chip-action">{item.action}</span>
+              {item.topic && <span className="chip-topic">{item.topic}</span>}
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   )
