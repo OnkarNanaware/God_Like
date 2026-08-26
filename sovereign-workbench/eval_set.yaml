@@ -1,0 +1,67 @@
+# eval_set.yaml
+# =============
+# Retrieval evaluation queries for the Sovereign Workbench RAG pipeline.
+#
+# Format:
+#   query           — natural language search query
+#   expected_doc    — filename that MUST appear in top-k results (pass criterion)
+#   source_category — optional: filter to this category (null = search all)
+#   notes           — human-readable explanation of what this tests
+#
+# Editing guide:
+#   - Keep expected_doc as the exact filename (not path, just basename).
+#   - negative_* entries should have expected_doc: null — they test that
+#     the retrieval system doesn't hallucinate a relevant result for
+#     out-of-corpus topics.
+
+queries:
+  - id: mrpl_env_01
+    query: "MRPL environmental compliance and pollution control measures"
+    expected_doc: "environment_report.pdf"
+    source_category: mrpl_public
+    notes: "Core use-case: environmental query → environment report"
+
+  - id: mrpl_org_01
+    query: "MRPL organisational hierarchy and reporting structure"
+    expected_doc: "Organisation-chart212022.pdf"
+    source_category: mrpl_public
+    notes: "Org chart query → org chart PDF"
+
+  - id: mrpl_annual_01
+    query: "MRPL annual financial performance revenue and capital expenditure"
+    expected_doc: "annual_report.pdf"
+    source_category: mrpl_public
+    notes: "Financial query → annual report"
+
+  - id: mrpl_rti_01
+    query: "Right to Information Act public disclosure obligations MRPL"
+    expected_doc: "RTI-ActEnglish.pdf"
+    source_category: mrpl_public
+    notes: "RTI Act query → RTI document"
+
+  - id: mrpl_sustain_01
+    query: "MRPL sustainability goals ESG carbon emissions reduction targets"
+    expected_doc: "MRPL_Sustainability_report_FY_2024-25.pdf"
+    source_category: mrpl_public
+    notes: "Sustainability query → one of the two sustainability reports"
+
+  - id: oisd_01
+    query: "OISD inspection standards for pressure vessels and storage tanks"
+    expected_doc: "OISD_Standards_Detailed_Explanation_Guide_SIH26117.pdf"
+    source_category: oisd_standards
+    notes: "OISD query → the consolidated OISD reference document"
+
+  - id: oisd_piping_01
+    query: "oil industry safety directorate piping system inspection requirements"
+    expected_doc: "OISD_Standards_Detailed_Explanation_Guide_SIH26117.pdf"
+    source_category: oisd_standards
+    notes: "Another angle on OISD: piping systems coverage"
+
+  - id: negative_01
+    query: "spacecraft propulsion system design and orbital mechanics"
+    expected_doc: null
+    source_category: null
+    notes: >
+      Deliberately out-of-corpus query (aerospace).  Should return low-score
+      or empty results, proving the corpus has real discrimination and doesn't
+      just return something for every query.
