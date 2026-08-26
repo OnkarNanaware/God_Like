@@ -132,6 +132,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             from app.rag.ingestor import Ingestor
             from app.rag.store import VectorStore
             from app.tools.rag_search import RagSearchTool
+            from app.tools.vision import VisionExtractTool
             from app.tools.registry import register_tool
 
             _vector_store = VectorStore()          # localhost:6333
@@ -141,8 +142,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 store=_vector_store,
                 audit_logger=_audit_logger,
             )
-            # Register the RAG search tool with the orchestrator's registry.
-            # Pass audit_logger so every retrieval call is logged (RAG_RETRIEVAL).
+            # Register the RAG search and vision tools with the orchestrator's registry.
             register_tool(
                 RagSearchTool(
                     store=_vector_store,
@@ -150,7 +150,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     audit_logger=_audit_logger,
                 )
             )
-            _log.info("RAG pipeline ready (Qdrant + bge-m3) — rag_search tool registered")
+            register_tool(
+                VisionExtractTool(
+                    audit_logger=_audit_logger,
+                )
+            )
+            _log.info("RAG and Vision tools registered successfully")
 
         except ImportError as exc:
             _log.warning(

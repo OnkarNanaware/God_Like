@@ -127,6 +127,7 @@ def chunk_pdf(
 
     all_chunks: list[str] = []
     skipped_pages = 0
+    page_count = doc.page_count
 
     try:
         for page_num, page in enumerate(doc, start=1):
@@ -152,7 +153,7 @@ def chunk_pdf(
         "chunked PDF '%s': %d chunks from %d page(s) (%d skipped)",
         pdf_path.name,
         len(all_chunks),
-        doc.page_count,
+        page_count,
         skipped_pages,
     )
     return all_chunks
