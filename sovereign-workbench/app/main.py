@@ -29,6 +29,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.audit.logger import AuditLogger, EventType
+from app.audit.async_adapter import AsyncAuditAdapter
 from app.models.ollama_client import (
     MODEL_REGISTRY,
     OllamaAPIError,
@@ -39,6 +40,9 @@ from app.models.ollama_client import (
 
 # Standalone sandbox router — no Ollama, no LLM, no orchestrator, no RAG.
 from app.sandbox.router import router as sandbox_router
+
+# Phase E: orchestrator + hardware endpoints.
+from app.routers.orchestrator_router import router as orchestrator_router, setup_orchestrator_router
 
 # ---------------------------------------------------------------------------
 # Logging — stdlib, writes to stdout AND to the structured audit file.
@@ -55,6 +59,7 @@ _log = logging.getLogger("sovereign.main")
 # ---------------------------------------------------------------------------
 
 _audit_logger: AuditLogger | None = None
+_async_audit: AsyncAuditAdapter | None = None  # Phase E: async-safe wrapper
 _default_client: OllamaClient | None = None
 _embedding_client: OllamaClient | None = None
 _vision_client: OllamaClient | None = None  # Phase D — VisionExtractTool
@@ -62,6 +67,9 @@ _vision_client: OllamaClient | None = None  # Phase D — VisionExtractTool
 # Phase C singletons
 _ingestor: Any | None = None   # app.rag.ingestor.Ingestor
 _vector_store: Any | None = None  # app.rag.store.VectorStore
+
+# Phase E: Orchestrator singleton
+_orchestrator: Any | None = None  # app.orchestrator.orchestrator.Orchestrator
 
 # The model used by the /chat endpoint — resolved at startup by tier_resolver.
 _DEFAULT_MODEL_NAME = os.environ.get("DEFAULT_MODEL", "qwen25_14b_instruct")
@@ -76,11 +84,12 @@ _DEFAULT_VISION_MODEL_NAME = "qwen25vl_3b"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    global _audit_logger, _default_client, _embedding_client, _vision_client, _ingestor, _vector_store
+    global _audit_logger, _async_audit, _default_client, _embedding_client, _vision_client, _ingestor, _vector_store, _orchestrator
     resolved: dict = {}  # populated by tier resolver; safe default for scope
 
     # ── Audit logger ───────────────────────────────────────────────────
     _audit_logger = AuditLogger()
+    _async_audit = AsyncAuditAdapter(_audit_logger)  # Phase E: thread-safe async wrapper
     _log.info("AuditLogger initialised — log path: %s", _audit_logger._path)
 
     # ── GPU-adaptive model selection ───────────────────────────────────
@@ -201,6 +210,35 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 exc,
             )
 
+    # ── Phase E: Orchestrator singleton ───────────────────────────────
+    try:
+        from app.orchestrator.orchestrator import Orchestrator
+        _orchestrator = Orchestrator(
+            llm_client=_default_client,
+            audit_logger=_audit_logger,
+        )
+        # Wire up gpu_info for /hardware/status
+        try:
+            from app.hardware.gpu_detect import detect_gpu
+            _startup_gpu_info = detect_gpu()
+        except Exception:
+            _startup_gpu_info = {
+                "gpu_available": False,
+                "total_vram_mb": 0,
+                "free_vram_mb": 0,
+                "device_name": "",
+            }
+        setup_orchestrator_router(
+            audit_logger=_audit_logger,
+            async_audit=_async_audit,
+            orchestrator=_orchestrator,
+            startup_resolved=resolved,
+            startup_gpu_info=_startup_gpu_info,
+        )
+        _log.info("Orchestrator initialised and Phase E router wired.")
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("Orchestrator setup failed (%s) — /orchestrator endpoints unavailable", exc)
+
     yield  # ← application runs here
 
     # Shutdown
@@ -210,7 +248,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await _embedding_client.aclose()
     if _vision_client is not None:
         await _vision_client.aclose()
-    _log.info("Sovereign Workbench shut down cleanly.")
+    _log.info("Sovereign Workbench shut down cleanly — Phase E.")
 
 
 # ---------------------------------------------------------------------------
@@ -224,21 +262,24 @@ app = FastAPI(
         "All inference runs on localhost via Ollama.  "
         "No external network calls are made at any time."
     ),
-    version="0.1.0-phase-c",
+    version="0.1.0-phase-e",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
 )
 
 # CORS: restrict to localhost origins only.
+# Phase E adds port 5173 (Vite dev server default).
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost",
         "http://localhost:3000",
+        "http://localhost:5173",
         "http://localhost:8000",
         "http://127.0.0.1",
         "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
         "http://127.0.0.1:8000",
     ],
     allow_credentials=True,
@@ -248,6 +289,9 @@ app.add_middleware(
 
 # Register the standalone sandbox endpoint (POST /sandbox/execute)
 app.include_router(sandbox_router)
+
+# Phase E: orchestrator, hardware, audit, and file-download endpoints.
+app.include_router(orchestrator_router)
 
 
 # ---------------------------------------------------------------------------
@@ -377,7 +421,8 @@ async def health_check() -> dict[str, str]:
     workbench itself stays up even when a model is being loaded.
     """
     rag_status = "ready" if _ingestor is not None else "unavailable"
-    return {"status": "ok", "phase": "C", "rag": rag_status}
+    orch_status = "ready" if _orchestrator is not None else "unavailable"
+    return {"status": "ok", "phase": "E", "rag": rag_status, "orchestrator": orch_status}
 
 
 @app.get("/models", tags=["Meta"])

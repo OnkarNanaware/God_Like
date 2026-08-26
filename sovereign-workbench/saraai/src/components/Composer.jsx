@@ -1,17 +1,28 @@
 import React, { useState, useRef, useEffect } from 'react'
 import { PaperclipIcon, MicIcon, ArrowUpIcon, FileIcon, CloseIcon } from './Icons'
 
-export default function Composer({ onSend, onOpenHelp }) {
+/**
+ * Composer
+ * ========
+ * Message-input bar with file attachment support.
+ *
+ * Change from Phase D mock:
+ *   onSend(text, files) now receives real File objects (not name labels).
+ *   The parent (App.jsx) passes them through to submitGoal() as multipart.
+ */
+export default function Composer({ onSend, onOpenHelp, disabled = false }) {
   const [text, setText] = useState('')
-  const [attachedFiles, setAttachedFiles] = useState([])
+  const [attachedFiles, setAttachedFiles] = useState([])  // array of File objects
   const textareaRef = useRef(null)
 
   useEffect(() => {
-    textareaRef.current?.focus()
-  }, [])
+    if (!disabled) {
+      textareaRef.current?.focus()
+    }
+  }, [disabled])
 
   function handleKeyDown(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter' && !e.shiftKey && !disabled) {
       e.preventDefault()
       submit()
     }
@@ -27,23 +38,29 @@ export default function Composer({ onSend, onOpenHelp }) {
 
   function handleFileChange(e) {
     if (e.target.files && e.target.files.length > 0) {
-      const newFiles = Array.from(e.target.files).map(f => ({
-        name: f.name,
-        size: (f.size / (1024 * 1024)).toFixed(1) + ' MB'
-      }))
+      // Keep actual File objects so they can be sent in multipart POST
+      const newFiles = Array.from(e.target.files)
       setAttachedFiles(prev => [...prev, ...newFiles])
     }
+    // Reset input so the same file can be re-attached if removed and re-added
+    e.target.value = ''
   }
 
   function removeFile(index) {
     setAttachedFiles(prev => prev.filter((_, i) => i !== index))
   }
 
+  function formatSize(bytes) {
+    if (bytes < 1024) return `${bytes} B`
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  }
+
   function submit() {
+    if (disabled) return
     if (!text.trim() && attachedFiles.length === 0) return
-    const fileLabels = attachedFiles.map(f => `[Attached: ${f.name}]`).join(' ')
-    const fullText = fileLabels ? `${text} ${fileLabels}`.trim() : text.trim()
-    onSend(fullText)
+    // Pass real File objects to parent — NOT injected label strings
+    onSend(text.trim(), attachedFiles)
     setText('')
     setAttachedFiles([])
     if (textareaRef.current) {
@@ -51,10 +68,14 @@ export default function Composer({ onSend, onOpenHelp }) {
     }
   }
 
+  const canSend = !disabled && (text.trim().length > 0 || attachedFiles.length > 0)
+
   return (
     <div className="composer-outer-wrapper">
-      <div className="composer-box">
-        {/* Attached Files Preview (Stitch Screen 12) */}
+      <div className={`composer-box ${disabled ? 'composer-disabled' : ''}`}
+        style={disabled ? { opacity: 0.5, pointerEvents: 'none' } : undefined}
+      >
+        {/* Attached Files Preview */}
         {attachedFiles.length > 0 && (
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, paddingBottom: 6 }}>
             {attachedFiles.map((file, idx) => (
@@ -74,7 +95,9 @@ export default function Composer({ onSend, onOpenHelp }) {
               >
                 <FileIcon size={14} />
                 <span style={{ fontWeight: 500 }}>{file.name}</span>
-                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>({file.size})</span>
+                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                  ({formatSize(file.size)})
+                </span>
                 <button
                   type="button"
                   style={{
@@ -87,6 +110,7 @@ export default function Composer({ onSend, onOpenHelp }) {
                     padding: 2
                   }}
                   onClick={() => removeFile(idx)}
+                  aria-label={`Remove ${file.name}`}
                 >
                   <CloseIcon size={12} />
                 </button>
@@ -102,19 +126,23 @@ export default function Composer({ onSend, onOpenHelp }) {
           value={text}
           onChange={handleInput}
           onKeyDown={handleKeyDown}
-          placeholder="Message Sa-Ra AI..."
+          placeholder={disabled ? 'Detecting hardware…' : 'Message Sa-Ra AI…'}
           aria-label="Message Sa-Ra AI"
+          disabled={disabled}
         />
 
         <div className="composer-bottom-bar">
           <div className="composer-left-tools">
-            <label className="composer-tool-btn" title="Attach File" style={{ cursor: 'pointer' }}>
+            <label className="composer-tool-btn" title="Attach File (image or PDF)"
+              style={{ cursor: disabled ? 'not-allowed' : 'pointer' }}>
               <PaperclipIcon size={18} />
               <input
                 type="file"
                 multiple
+                accept="image/*,.pdf"
                 style={{ display: 'none' }}
                 onChange={handleFileChange}
+                disabled={disabled}
               />
             </label>
           </div>
@@ -125,16 +153,18 @@ export default function Composer({ onSend, onOpenHelp }) {
               className="composer-tool-btn"
               title="Voice Input"
               onClick={() => alert('Voice input activated (listening...)')}
+              disabled={disabled}
             >
               <MicIcon size={18} />
             </button>
 
             <button
               type="button"
-              className={`btn-send-circle ${(text.trim() || attachedFiles.length > 0) ? 'active' : ''}`}
+              id="send-button"
+              className={`btn-send-circle ${canSend ? 'active' : ''}`}
               onClick={submit}
-              disabled={!text.trim() && attachedFiles.length === 0}
-              title="Send message"
+              disabled={!canSend}
+              title="Send message (Enter)"
               aria-label="Send message"
             >
               <ArrowUpIcon size={16} />

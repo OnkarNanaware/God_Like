@@ -191,9 +191,13 @@ class AuditLogger:
         *,
         request_id: str,
         payload: dict[str, Any],
-    ) -> None:
-        """Generic event logger for routing decisions, tool calls, etc."""
-        self._write_record(event_type, request_id=request_id, payload=payload)
+    ) -> "AuditRecord":
+        """Generic event logger for routing decisions, tool calls, etc.
+
+        Returns the created ``AuditRecord`` so callers (and the async adapter)
+        can inspect it if needed.
+        """
+        return self._write_record(event_type, request_id=request_id, payload=payload)
 
     def log_error(
         self,
@@ -260,7 +264,7 @@ class AuditLogger:
         *,
         request_id: str,
         payload: dict[str, Any],
-    ) -> None:
+    ) -> "AuditRecord":
         ts = datetime.now(tz=timezone.utc).isoformat()
 
         with self._lock:
@@ -306,6 +310,16 @@ class AuditLogger:
                 ) from exc
 
             self._prev_hash = self_hash
+
+        return AuditRecord(
+            event_type=event_type.value,
+            timestamp_utc=ts,
+            request_id=request_id,
+            sequence=seq,
+            prev_hash=prev_hash,
+            self_hash=self_hash,
+            payload=payload,
+        )
 
     def _log_startup_event(self) -> None:
         self._write_record(
