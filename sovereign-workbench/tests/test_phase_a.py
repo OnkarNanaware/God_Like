@@ -233,50 +233,49 @@ def test_audit_chain_is_intact(test_app, tmp_audit_log: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_ollama_connection_error_is_actionable():
+def test_ollama_connection_error_is_actionable(tmp_path: Path):
     """
     When Ollama is not running, OllamaClient must raise OllamaConnectionError
     with an actionable message — not a bare httpx exception.
     """
     import asyncio
 
-    with tempfile.NamedTemporaryFile(suffix=".jsonl") as f:
-        audit = AuditLogger(log_path=f.name)
+    audit = AuditLogger(log_path=tmp_path / "audit.jsonl")
 
-        from app.models.ollama_client import OllamaClient, OllamaConnectionError
+    from app.models.ollama_client import OllamaClient, OllamaConnectionError
 
-        with patch.dict(
-            "app.models.ollama_client.MODEL_REGISTRY",
-            {
-                "qwen25_14b_instruct": {
-                    "name": "qwen25_14b_instruct",
-                    "ollama_tag": "qwen2.5:14b-instruct-q4_K_M",
-                    "endpoint": "http://localhost:11434",
-                    "modality": "text",
-                    "context_length": 32768,
-                    "capability_tags": ["chat"],
-                }
-            },
-        ):
-            client = OllamaClient("qwen25_14b_instruct", audit_logger=audit)
+    with patch.dict(
+        "app.models.ollama_client.MODEL_REGISTRY",
+        {
+            "qwen25_14b_instruct": {
+                "name": "qwen25_14b_instruct",
+                "ollama_tag": "qwen2.5:14b-instruct-q4_K_M",
+                "endpoint": "http://localhost:11434",
+                "modality": "text",
+                "context_length": 32768,
+                "capability_tags": ["chat"],
+            }
+        },
+    ):
+        client = OllamaClient("qwen25_14b_instruct", audit_logger=audit)
 
-        # Patch send to raise ConnectError.
-        async def _raise_connect(*args, **kwargs):
-            raise httpx.ConnectError("Connection refused")
+    # Patch send to raise ConnectError.
+    async def _raise_connect(*args, **kwargs):
+        raise httpx.ConnectError("Connection refused")
 
-        client._http.send = _raise_connect  # type: ignore[method-assign]
+    client._http.send = _raise_connect  # type: ignore[method-assign]
 
-        with pytest.raises(OllamaConnectionError) as exc_info:
-            asyncio.run(
-                client.chat_completion(
-                    [{"role": "user", "content": "test"}], request_id="test-001"
-                )
+    with pytest.raises(OllamaConnectionError) as exc_info:
+        asyncio.run(
+            client.chat_completion(
+                [{"role": "user", "content": "test"}], request_id="test-001"
             )
-
-        msg = str(exc_info.value)
-        assert "ollama serve" in msg.lower() or "11434" in msg, (
-            f"Error message not actionable: {msg!r}"
         )
+
+    msg = str(exc_info.value)
+    assert "ollama serve" in msg.lower() or "11434" in msg, (
+        f"Error message not actionable: {msg!r}"
+    )
 
 
 # ---------------------------------------------------------------------------

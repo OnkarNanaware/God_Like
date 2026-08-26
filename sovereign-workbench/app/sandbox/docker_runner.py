@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import platform
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -109,11 +110,13 @@ async def run_code_in_docker(
     :class:`RawRunResult` — never raises; all errors are captured inside it.
     """
     docker_workspace = _host_path_for_docker(workspace)
+    container_name = f"sovereign-sandbox-{uuid.uuid4().hex[:12]}"
 
     cmd = [
         "docker", "run",
         # ── Lifecycle ───────────────────────────────────────────────────
         "--rm",                                  # auto-remove after exit
+        "--name", container_name,                # deterministic name for reliable cleanup
         # ── Network ─────────────────────────────────────────────────────
         "--network=none",                        # complete network isolation
         # ── Resources ───────────────────────────────────────────────────
@@ -151,13 +154,27 @@ async def run_code_in_docker(
         except asyncio.TimeoutError:
             timed_out = True
             _log.warning(
-                "Sandbox timed out after %ds — sending SIGKILL to container", timeout
+                "Sandbox timed out after %ds — terminating container %s",
+                timeout,
+                container_name,
             )
             try:
                 proc.kill()
                 await proc.communicate()          # drain to avoid zombie
             except ProcessLookupError:
                 pass
+
+            # Force remove the container in Docker daemon immediately
+            try:
+                rm_proc = await asyncio.create_subprocess_exec(
+                    "docker", "rm", "-f", container_name,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await rm_proc.wait()
+            except Exception:
+                pass
+
             stdout_bytes = b""
             stderr_bytes = b"Execution timed out."
             exit_code = 124

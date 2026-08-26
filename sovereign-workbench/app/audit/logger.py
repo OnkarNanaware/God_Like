@@ -80,6 +80,7 @@ class EventType(str, Enum):
     ERROR = "error"
     RAG_INGEST = "rag_ingest"
     RAG_RETRIEVAL = "rag_retrieval"  # Phase C: logged on every rag_search call
+    VISION_EXTRACT = "vision_extract"  # Phase C: logged on every vision_extract call
 
 
 
