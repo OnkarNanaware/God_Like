@@ -32,3 +32,4 @@ qdrant_data/
 dist/
 build/
 *.egg-info/
+outputs/generated/

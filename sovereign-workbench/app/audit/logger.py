@@ -64,6 +64,9 @@ class EventType(str, Enum):
     ERROR = "error"
     RAG_INGEST = "rag_ingest"
     RAG_RETRIEVAL = "rag_retrieval"  # Phase C: logged on every rag_search call
+    VISION_EXTRACT = "vision_extract"  # Phase D: logged on every vision_extract call
+    DOCGEN = "docgen"                  # Phase D: logged on every document generation call
+    SANDBOX_EXEC = "sandbox_exec"      # Phase D: logged on every code sandbox execution
 
 
 

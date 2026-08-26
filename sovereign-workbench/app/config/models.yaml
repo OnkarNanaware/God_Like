@@ -109,6 +109,7 @@ models:
       - image_understanding
       - ocr
       - document_vision
+      - vision_extraction
       - chart_analysis
 
   - name: qwen25vl_7b
@@ -122,6 +123,7 @@ models:
       - image_understanding
       - ocr
       - document_vision
+      - vision_extraction
       - chart_analysis
 
   # ── Embedding ─────────────────────────────────────────────

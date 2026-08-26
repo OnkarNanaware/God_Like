@@ -1,0 +1,124 @@
+SOVEREIGN WORKBENCH REFERENCE DOCUMENT
+Standard Operating Procedure — Inspection Finding Approval Note
+Document ID : SOP-OPS-2024-017
+Revision    : B
+Effective   : 2024-09-01
+Owner       : Operations Excellence Group
+
+================================================================
+1. PURPOSE
+================================================================
+This SOP defines the mandatory workflow for issuing an Approval
+Note (AN) following a scheduled or unscheduled inspection of any
+process unit operating under OISD Standards 118 or 141.
+
+An Approval Note is the formal instrument that authorises (or
+conditionally authorises) restart of a process unit after an
+inspection finding has been reviewed and dispositioned.
+
+================================================================
+2. SCOPE
+================================================================
+Applies to all process units in the refinery complex, including:
+  - Crude Distillation Units (CDU)
+  - Vacuum Distillation Units (VDU)
+  - Hydrotreaters and Hydrocrackers
+  - Utility systems (boilers, cooling towers, flare systems)
+
+================================================================
+3. REGULATORY BASIS
+================================================================
+OISD Standard 118, Section 4.3 — "Inspection and Corrective
+Action Closure" mandates that no process unit may be restarted
+after a HIGH-severity finding until a signed Approval Note is
+issued by the Chief Inspector or designated authority.
+
+Failure to obtain an Approval Note before restart constitutes a
+non-compliance event and must be reported to the Plant Safety
+Officer within 24 hours (OISD-118 Cl. 9.2).
+
+================================================================
+4. APPROVAL NOTE — MANDATORY SECTIONS
+================================================================
+Every Approval Note issued under this SOP must contain:
+
+4.1  HEADER INFORMATION
+     - Report Reference (from the Inspection Report)
+     - Facility / Unit identification
+     - Inspection date
+     - Approval Note serial number (auto-assigned by ERP)
+
+4.2  FINDINGS SUMMARY TABLE
+     A verbatim copy of the inspection findings table, with
+     columns: Finding ID, Description, Severity, Status,
+     Disposition (Accept / Reject / Conditional Accept).
+
+4.3  CORRECTIVE ACTION REGISTER
+     For each OPEN finding, the Approval Note must record:
+     - Agreed corrective action (verbatim from inspection report
+       or amended by the Chief Inspector)
+     - Responsible engineer name and employee ID
+     - Committed completion date (must comply with timelines
+       specified in OISD-118 Cl. 4.3)
+
+4.4  CONDITIONS FOR RESTART (if Conditional Accept)
+     List all operating restrictions that must be maintained
+     until corrective actions are closed, e.g.:
+       "HX-401 — operate at ≤ 85% throughput until tube bundle
+       replaced. Maximum shell-side outlet temperature: 295 °C."
+
+4.5  CITATION OF RETRIEVED STANDARDS
+     The Approval Note must cite the specific SOP, clause, and
+     regulatory reference relied upon. Format:
+       "[Source: <document name>, <clause>]"
+     This field is required for audit traceability.
+
+4.6  AUTHORITY SIGNATURES
+     - Chief Inspector (mandatory for HIGH findings)
+     - Plant Safety Officer (mandatory for MEDIUM/HIGH findings)
+     - Plant Manager (mandatory for HIGH findings or unit restart)
+
+================================================================
+5. WORKFLOW STEPS
+================================================================
+Step 1: Inspector submits Inspection Report to Chief Inspector
+        within 24 hours of inspection completion.
+Step 2: Chief Inspector reviews within 48 hours and classifies
+        each finding.
+Step 3: For HIGH findings — convene a Corrective Action Review
+        Board (CARB) within 7 calendar days.
+Step 4: Draft Approval Note using this SOP template (Section 4).
+Step 5: Obtain all required signatures (Section 4.6).
+Step 6: Upload signed Approval Note to the DMS under folder:
+        OPS / INSPECTION / APPROVAL_NOTES / <Year> / <UnitID>
+Step 7: Notify Plant Control Room that restart is authorised.
+Step 8: Close corrective actions in PMT system within agreed
+        timelines. Verify closure with follow-up inspection.
+
+================================================================
+6. TIMELINES (OISD-118 REFERENCE)
+================================================================
+Severity | CARB Convene | Corrective Action Deadline
+---------+--------------+----------------------------------
+HIGH     | 7 days       | Before restart (mandatory hold)
+MEDIUM   | 30 days      | Within 30 days of inspection
+LOW      | 90 days      | At next planned shutdown
+INFORMATION | N/A       | Log in PMT; no deadline
+
+================================================================
+7. REFERENCES
+================================================================
+[1] OISD Standard 118 — Inspection of Pressure Vessels and
+    Storage Tanks (latest edition)
+[2] OISD Standard 141 — Design and General Requirements for
+    Offshore Process Platforms (applicable sub-sections)
+[3] Plant Engineering Procedure PEP-2023-004 — Tube Bundle
+    Inspection and Replacement Criteria
+[4] SOP-OPS-2024-017 Rev B (this document)
+
+================================================================
+8. REVISION HISTORY
+================================================================
+Rev A (2022-01-10): Initial release.
+Rev B (2024-09-01): Added Section 4.5 (citation requirement) and
+  updated timelines table to align with OISD-118 2024 edition.

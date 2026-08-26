@@ -25,15 +25,24 @@ from __future__ import annotations
 from typing import Optional
 
 from app.tools.base import BaseTool
+from app.tools.code_sandbox import CodeSandboxTool
+from app.tools.docgen import GenerateDocxTool, GeneratePptxTool, GenerateXlsxTool
 from app.tools.file_read import FileReadTool
 
 # ---------------------------------------------------------------------------
 # Static tool instances — always available, no runtime deps.
 # ---------------------------------------------------------------------------
+# Note: VisionExtractTool requires an OllamaClient — it is registered
+# dynamically in app/main.py after the Ollama client is initialised.
 
 _REGISTERED_TOOLS: list[BaseTool] = [
     FileReadTool(),
-    # Phase D: add CodeSandboxTool(), DocGenerateTool(), etc.
+    # Phase D — docgen (pure Python, no runtime deps)
+    GenerateDocxTool(),
+    GeneratePptxTool(),
+    GenerateXlsxTool(),
+    # Phase D — code sandbox (requires local Docker daemon)
+    CodeSandboxTool(),
 ]
 
 # Lookup dict: tool name → tool instance

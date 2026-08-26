@@ -1,0 +1,96 @@
+MAHARASHTRA REFINERY PIPELINE INSPECTION REPORT
+Facility: MRPL Unit 4 — Crude Distillation Unit
+Inspection Date: 2026-08-15
+Report Reference: MRPL-U4-CDU-2026-08-INS-047
+Inspector: Eng. Priya Sharma (ID: ENG-3311)
+Approved By: Chief Inspector R. Nair (pending)
+
+================================================================
+EXECUTIVE SUMMARY
+================================================================
+A scheduled quarterly inspection of the Crude Distillation Unit
+(CDU) heat exchangers and associated pipework was conducted on
+2026-08-15. Three significant findings requiring corrective
+action before the next operational cycle were identified.
+One finding is classified HIGH severity and must be addressed
+within 7 calendar days per OISD Standard 118 Section 4.3.
+
+================================================================
+SECTION 1 — TEMPERATURE ANOMALY
+================================================================
+Finding ID : F-001
+Component  : Pre-heat exchanger HX-401 (shell side outlet)
+Location   : Column A, Row 3, West Bay
+Severity   : HIGH
+Observation:
+    Infrared thermography and thermocouple readings at HX-401
+    shell-side outlet consistently recorded 312 °C against a
+    design maximum of 290 °C — a deviation of +22 °C (7.6%).
+    Prolonged operation above design temperature risks stress
+    corrosion cracking of the carbon steel shell.
+Recommended Action:
+    Reduce throughput to 85% capacity and schedule tube bundle
+    inspection. Replace fouled tube internals if fouling index
+    exceeds 0.0003 m²·K/W. Refer OISD-118 Cl. 4.3 for
+    mandatory approval workflow prior to restart.
+Status: OPEN — corrective action required before next run.
+
+================================================================
+SECTION 2 — PRESSURE VARIANCE
+================================================================
+Finding ID : F-002
+Component  : Overhead condenser line OC-12 (inlet flange)
+Location   : Overhead deck, North side
+Severity   : MEDIUM
+Observation:
+    Operating pressure at the OC-12 inlet flange averaged
+    18.4 bar(g) over the 72-hour observation window against
+    a design operating pressure of 17.5 bar(g). The +0.9 bar
+    variance (5.1%) is within the pressure safety valve (PSV)
+    set-point of 21.0 bar(g) but exceeds the +3% instrument
+    tolerance band specified in the process data sheet.
+    Possible root cause: partial blockage in the overhead
+    vapour line downstream of the condenser.
+Recommended Action:
+    Inspect and clean the overhead vapour line. Re-calibrate
+    pressure transmitter PT-4012. Re-validate against P&ID
+    drawing MRPL-U4-PID-CDU-014 Rev. C.
+Status: OPEN — inspection within 30 days.
+
+================================================================
+SECTION 3 — CORRODED GASKET
+================================================================
+Finding ID : F-003
+Component  : Pump suction line flange PL-22 / PL-23
+Location   : Ground level, East pump skid
+Severity   : LOW
+Observation:
+    Visual inspection of the spiral-wound gasket at the
+    PL-22/PL-23 flange joint revealed surface oxidation
+    (red-brown scale) consistent with atmospheric moisture
+    ingress. No active leakage detected. Gasket material:
+    304 SS / flexible graphite (Flexitallic CG style).
+    Expected remaining life at observed corrosion rate:
+    approximately 8–12 months.
+Recommended Action:
+    Replace gasket at next planned shutdown (estimated
+    Q1 2027). Apply anti-corrosion coating to exposed
+    bolt/nut surfaces. Log in the preventive maintenance
+    tracker (PMT-2024-GL-PL22).
+Status: OPEN — planned maintenance (non-urgent).
+
+================================================================
+SUMMARY TABLE
+================================================================
+ID    | Finding                  | Severity | Status
+------+--------------------------+----------+---------------
+F-001 | Temperature anomaly HX-401 | HIGH   | OPEN
+F-002 | Pressure variance OC-12  | MEDIUM   | OPEN
+F-003 | Corroded gasket PL-22/23 | LOW      | OPEN
+
+================================================================
+SIGNATURES
+================================================================
+Inspector      : Priya Sharma         Date: 2026-08-15
+Reviewed By    : (pending Chief Inspector signature)
+Next Inspection: 2026-11-15 (quarterly cycle)
