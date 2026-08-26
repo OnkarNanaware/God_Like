@@ -37,6 +37,9 @@ from app.models.ollama_client import (
     OllamaTimeoutError,
 )
 
+# Standalone sandbox router — no Ollama, no LLM, no orchestrator, no RAG.
+from app.sandbox.router import router as sandbox_router
+
 # ---------------------------------------------------------------------------
 # Logging — stdlib, writes to stdout AND to the structured audit file.
 # ---------------------------------------------------------------------------
@@ -196,6 +199,9 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+# Register the standalone sandbox endpoint (POST /sandbox/execute)
+app.include_router(sandbox_router)
 
 
 # ---------------------------------------------------------------------------

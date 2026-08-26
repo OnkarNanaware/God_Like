@@ -34,7 +34,23 @@ Usage
 
 from __future__ import annotations
 
-import fcntl
+# fcntl is Linux/macOS only — provide a no-op shim on Windows so the
+# module imports cleanly.  The threading.Lock in _write_record still
+# serialises writes within a single process; the OS-level flock is only
+# absent on Windows dev runs, not in production (Linux containers).
+try:
+    import fcntl as fcntl  # noqa: PLC0414 — real fcntl on POSIX
+except ImportError:  # Windows
+    import threading as _threading
+    class fcntl:  # type: ignore[no-redef]  # minimal shim
+        LOCK_EX = 2
+        LOCK_UN = 8
+        _lock = _threading.Lock()
+
+        @staticmethod
+        def flock(fh: object, op: int) -> None:  # noqa: ARG004
+            """No-op on Windows — threading.Lock in _write_record handles intra-process serialisation."""
+
 import hashlib
 import json
 import logging
