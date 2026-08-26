@@ -69,12 +69,14 @@ models:
 
   # ── Coding ───────────────────────────────────────────────
   - name: qwen25_coder_7b
-    ollama_tag: "qwen2.5-coder:7b"
+    # NOTE: qwen2.5-coder:7b was not pulled on this machine; tag updated to the
+    # 14b variant that is present.  Pull 7b explicitly to use the smaller model.
+    ollama_tag: "qwen2.5-coder:14b"
     endpoint: "http://localhost:11434"
     modality: code
     context_length: 32768
     tier: small
-    est_vram_mb: 4700
+    est_vram_mb: 9000
     capability_tags:
       - code_generation
       - code_review
