@@ -3,8 +3,8 @@ tests/test_phase_c.py
 =====================
 Phase C offline tests — all pass without a live Ollama instance or Qdrant.
 
-Coverage (15 tests)
--------------------
+Phase C baseline (18 tests)
+---------------------------
  1.  chunk_text: correct chunk / overlap counts
  2.  chunk_text: text shorter than chunk_size → single chunk
  3.  chunk_text: empty string → empty list
@@ -15,11 +15,23 @@ Coverage (15 tests)
  8.  tier_resolver: picks larger model when budget is sufficient
  9.  tier_resolver: respects FORCE_TIER env var
 10.  Embedder.embed_batch: calls ollama_client.embeddings N times
-11.  VectorStore.upsert: calls qdrant_client.upsert with correct payload shape
-12.  VectorStore.search: returns SearchResult list
-13.  Ingestor.ingest: end-to-end chunk→embed→upsert + audit record written
-14.  Ingestor.ingest: raises FileNotFoundError on missing source
-15.  RagSearchTool.execute: returns formatted markdown from mocked store
+11.  Embedder.embed_batch: raises on empty list
+12.  VectorStore.upsert: calls qdrant_client.upsert with correct payload shape
+13.  VectorStore.search: returns SearchResult list
+14.  Ingestor.ingest: end-to-end chunk→embed→upsert + audit record written
+15.  Ingestor.ingest: raises FileNotFoundError on missing source
+16.  RagSearchTool.execute: returns formatted markdown from mocked store
+17.  RagSearchTool.execute: returns failure when query is missing
+18.  RagSearchTool.execute: returns success on empty results
+
+Phase C — new spec tests (6 tests, tests 19-24)
+-------------------------------------------------
+19.  KnowledgeBaseIngestor: all metadata fields populated, confidentiality='public'
+20.  KnowledgeBaseIngestor: zero-text PDF logs warning, batch continues (skip not fail)
+21.  KnowledgeBaseIngestor: re-ingestion updates not duplicates (deterministic IDs)
+22.  RagSearchTool / store.search_filtered: withdrawn chunks excluded by default
+23.  RagSearchTool: audit log entry written with request_id, query, doc names
+24.  Orchestrator: 2-step plan calls rag_search as a registered tool
 """
 
 from __future__ import annotations
@@ -379,7 +391,7 @@ class TestRagSearchTool:
         mock_embedder.embed_one = AsyncMock(return_value=[0.1] * 1024)
 
         chunk_id = str(uuid.uuid4())
-        mock_store.search.return_value = [
+        mock_store.search_filtered.return_value = [
             SearchResult(
                 score=0.92,
                 text="The answer is 42.",
@@ -412,7 +424,7 @@ class TestRagSearchTool:
         from app.tools.rag_search import RagSearchTool
 
         mock_store = MagicMock()
-        mock_store.search.return_value = []
+        mock_store.search_filtered.return_value = []
         mock_embedder = MagicMock()
         mock_embedder.embed_one = AsyncMock(return_value=[0.1] * 1024)
 
@@ -420,3 +432,562 @@ class TestRagSearchTool:
         result = _run(tool.execute(query="something obscure"))
         assert result.success is True
         assert "No relevant" in result.output
+
+
+# ===========================================================================
+# ── 19-24: New Phase C spec tests (FakeEmbeddingClient + in-memory Qdrant)
+# ===========================================================================
+#
+# These tests use:
+#   - FakeEmbeddingClient: deterministic fixed-vector, no Ollama needed.
+#   - In-memory QdrantClient (":memory:"): real Qdrant library, no server.
+#   - FakeOllamaClient: from the Phase B pattern, for orchestrator tests.
+#
+# All pass fully offline.
+# ---------------------------------------------------------------------------
+
+
+class FakeEmbeddingClient:
+    """
+    Deterministic embedding stub.  Always returns the same fixed 1024-dim
+    vector so semantic similarity comparisons are stable across test runs.
+    """
+
+    def __init__(self, dim: int = 1024, value: float = 0.1) -> None:
+        self._dim = dim
+        self._value = value
+        self.call_count = 0
+
+    async def embeddings(
+        self,
+        text: str,
+        *,
+        request_id: str | None = None,
+    ) -> list[float]:
+        self.call_count += 1
+        return [self._value] * self._dim
+
+
+def _make_in_memory_store():
+    """
+    Return a VectorStore whose internal Qdrant client points at ':memory:'.
+    Bypasses VectorStore.__init__ (which connects to localhost:6333).
+    """
+    from app.rag.store import VectorStore
+    from qdrant_client import QdrantClient  # type: ignore[import]
+
+    store = VectorStore.__new__(VectorStore)
+    store._client = QdrantClient(":memory:")
+    return store
+
+
+# ---------------------------------------------------------------------------
+# 19. KnowledgeBaseIngestor — metadata schema
+# ---------------------------------------------------------------------------
+
+
+class TestKBIngestorMetadata:
+    def test_all_metadata_fields_populated(self, tmp_path):
+        """
+        Ingesting a small PDF-shaped fixture should produce chunks with
+        every required metadata field: doc_name, source_category, page_number,
+        edition_date (null), status ('in_force'), confidentiality ('public').
+
+        We synthesise a minimal real PDF using pymupdf so the chunker can
+        actually extract text (no mocking needed for chunker).
+        """
+        import fitz  # pymupdf
+        from app.audit.logger import AuditLogger
+        from app.rag.embedder import Embedder
+        from app.rag.ingest import KnowledgeBaseIngestor
+        from app.rag.store import make_chunk_id
+
+        # Create a tiny PDF with real extractable text
+        pdf_path = tmp_path / "test_doc.pdf"
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((50, 50), "This is test content for metadata verification. " * 20)
+        doc.save(str(pdf_path))
+        doc.close()
+
+        # Infrastructure
+        store = _make_in_memory_store()
+        fake_client = FakeEmbeddingClient()
+        embedder = Embedder(fake_client)
+        audit_log = tmp_path / "audit.jsonl"
+        audit = AuditLogger(log_path=audit_log)
+
+        kb_ingestor = KnowledgeBaseIngestor(
+            embedder=embedder,
+            store=store,
+            audit_logger=audit,
+        )
+
+        result = _run(
+            kb_ingestor.ingest_document(
+                pdf_path=pdf_path,
+                source_category="mrpl_public",
+                collection="test_col",
+            )
+        )
+
+        assert not result.skipped, "Expected chunks extracted, not skipped"
+        assert result.chunks_ingested > 0
+
+        # Read back from in-memory Qdrant and inspect payload
+        hits, _ = store._client.scroll(
+            collection_name="test_col",
+            with_payload=True,
+            limit=100,
+        )
+        assert len(hits) > 0
+
+        payload = hits[0].payload
+        assert payload["doc_name"] == "test_doc.pdf"
+        assert payload["source_category"] == "mrpl_public"
+        assert isinstance(payload["page_number"], int) and payload["page_number"] >= 1
+        assert payload["edition_date"] is None       # null — not guessed
+        assert payload["status"] == "in_force"       # default
+        assert payload["confidentiality"] == "public"  # default — enforced now
+        assert "text" in payload
+        assert "source" in payload
+        assert len(payload["source_sha256"]) == 64
+
+        # Verify the point ID is deterministic
+        expected_id = make_chunk_id("test_doc.pdf", payload["page_number"], 0)
+        # At least one chunk should have the expected deterministic id
+        all_ids = {str(h.id) for h in hits}
+        assert expected_id in all_ids, (
+            f"Deterministic point ID {expected_id!r} not found among {list(all_ids)[:5]}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 20. KnowledgeBaseIngestor — zero-text PDF (scanned/image-only)
+# ---------------------------------------------------------------------------
+
+
+class TestKBIngestorZeroTextPDF:
+    def test_zero_text_pdf_logs_warning_and_is_skipped(self, tmp_path, caplog):
+        """
+        A PDF with no extractable text (all-image pages) must:
+        - Log a WARNING mentioning ZERO_TEXT_PDF.
+        - Return a DocumentIngestResult with skipped=True.
+        - NOT crash the batch (no exception raised).
+        """
+        import fitz  # pymupdf
+        import logging
+        from app.audit.logger import AuditLogger
+        from app.rag.embedder import Embedder
+        from app.rag.ingest import KnowledgeBaseIngestor
+
+        # Create a PDF with a blank page (no text → fitz extracts nothing)
+        pdf_path = tmp_path / "blank_scan.pdf"
+        doc = fitz.open()
+        doc.new_page()   # blank page, no text layer
+        doc.save(str(pdf_path))
+        doc.close()
+
+        store = _make_in_memory_store()
+        fake_client = FakeEmbeddingClient()
+        embedder = Embedder(fake_client)
+        audit = AuditLogger(log_path=tmp_path / "audit.jsonl")
+
+        kb_ingestor = KnowledgeBaseIngestor(
+            embedder=embedder, store=store, audit_logger=audit
+        )
+
+        with caplog.at_level(logging.WARNING, logger="sovereign.rag.ingest"):
+            result = _run(
+                kb_ingestor.ingest_document(
+                    pdf_path=pdf_path,
+                    source_category="oisd_standards",
+                    collection="test_col",
+                )
+            )
+
+        assert result.skipped is True, "Expected skipped=True for zero-text PDF"
+        assert result.chunks_ingested == 0
+        assert result.skip_reason is not None
+
+        # embedder must NOT have been called (nothing to embed)
+        assert fake_client.call_count == 0, (
+            f"Embedder was called {fake_client.call_count} times on a zero-text PDF"
+        )
+
+        # Warning must have been logged
+        warning_messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("ZERO_TEXT_PDF" in m for m in warning_messages), (
+            f"Expected ZERO_TEXT_PDF warning, got: {warning_messages}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 21. Re-ingestion updates, not duplicates (deterministic IDs)
+# ---------------------------------------------------------------------------
+
+
+class TestKBIngestorReingestion:
+    def test_reingestion_updates_not_duplicates(self, tmp_path):
+        """
+        Running ingest_document twice on the same file must produce the same
+        set of deterministic point IDs.  Qdrant's upsert semantics will update
+        existing points, so the collection count must be identical after both
+        runs — no duplicates.
+        """
+        import fitz  # pymupdf
+        from app.audit.logger import AuditLogger
+        from app.rag.embedder import Embedder
+        from app.rag.ingest import KnowledgeBaseIngestor
+
+        pdf_path = tmp_path / "stable_doc.pdf"
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((50, 50), "Re-ingestion test content. " * 30)
+        doc.save(str(pdf_path))
+        doc.close()
+
+        store = _make_in_memory_store()
+        fake_client = FakeEmbeddingClient()
+        embedder = Embedder(fake_client)
+        audit = AuditLogger(log_path=tmp_path / "audit.jsonl")
+
+        kb_ingestor = KnowledgeBaseIngestor(
+            embedder=embedder, store=store, audit_logger=audit
+        )
+
+        # First ingest
+        r1 = _run(
+            kb_ingestor.ingest_document(
+                pdf_path=pdf_path,
+                source_category="mrpl_public",
+                collection="test_col",
+            )
+        )
+        count_after_first = store._client.count("test_col").count
+        assert count_after_first == r1.chunks_ingested
+
+        # Second ingest — same file, same IDs
+        r2 = _run(
+            kb_ingestor.ingest_document(
+                pdf_path=pdf_path,
+                source_category="mrpl_public",
+                collection="test_col",
+            )
+        )
+        count_after_second = store._client.count("test_col").count
+
+        assert count_after_second == count_after_first, (
+            f"Re-ingestion duplicated points: {count_after_first} → {count_after_second}. "
+            "Deterministic IDs are not working."
+        )
+        assert r2.chunks_ingested == r1.chunks_ingested
+
+
+# ---------------------------------------------------------------------------
+# 22. search_filtered — withdrawn chunks excluded by default
+# ---------------------------------------------------------------------------
+
+
+class TestSearchFilteredWithdrawn:
+    def test_withdrawn_chunks_excluded_by_default(self):
+        """
+        Store two points: one status='in_force', one status='withdrawn'.
+        search_filtered() with the default exclude_status=["withdrawn"] must
+        return only the in_force chunk.
+        """
+        from qdrant_client import QdrantClient  # type: ignore[import]
+        from qdrant_client.models import Distance, VectorParams, PointStruct
+        from app.rag.store import VectorStore, SearchResult, make_chunk_id
+
+        store = _make_in_memory_store()
+        DIM = 1024
+
+        # Create collection manually in in-memory client
+        store._client.create_collection(
+            "test_col",
+            vectors_config=VectorParams(size=DIM, distance=Distance.COSINE),
+        )
+
+        in_force_id = make_chunk_id("doc_a.pdf", 1, 0)
+        withdrawn_id = make_chunk_id("doc_b.pdf", 2, 0)
+
+        store._client.upsert(
+            collection_name="test_col",
+            points=[
+                PointStruct(
+                    id=in_force_id,
+                    vector=[0.1] * DIM,
+                    payload={
+                        "text": "Active content",
+                        "source": "/docs/doc_a.pdf",
+                        "doc_name": "doc_a.pdf",
+                        "source_category": "mrpl_public",
+                        "page_number": 1,
+                        "status": "in_force",
+                        "confidentiality": "public",
+                        "edition_date": None,
+                    },
+                ),
+                PointStruct(
+                    id=withdrawn_id,
+                    vector=[0.1] * DIM,
+                    payload={
+                        "text": "Withdrawn content",
+                        "source": "/docs/doc_b.pdf",
+                        "doc_name": "doc_b.pdf",
+                        "source_category": "mrpl_public",
+                        "page_number": 2,
+                        "status": "withdrawn",
+                        "confidentiality": "public",
+                        "edition_date": None,
+                    },
+                ),
+            ],
+        )
+
+        # Default search_filtered MUST exclude the withdrawn chunk
+        results = store.search_filtered(
+            collection="test_col",
+            query_vector=[0.1] * DIM,
+            top_k=10,
+        )
+
+        assert len(results) == 1, (
+            f"Expected 1 result (in_force only), got {len(results)}: "
+            f"{[r.doc_name for r in results]}"
+        )
+        assert results[0].doc_name == "doc_a.pdf"
+        assert results[0].status == "in_force"
+
+        # Unfiltered search should return both
+        all_results = store.search(
+            collection="test_col",
+            query_vector=[0.1] * DIM,
+            top_k=10,
+        )
+        assert len(all_results) == 2, (
+            f"Expected 2 results unfiltered, got {len(all_results)}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 23. RagSearchTool — RAG_RETRIEVAL audit log entry
+# ---------------------------------------------------------------------------
+
+
+class TestRagSearchAuditLog:
+    def test_retrieval_logged_with_request_id_query_docs(self, tmp_path):
+        """
+        RagSearchTool.execute() must write a RAG_RETRIEVAL audit record
+        containing: request_id, the query, and the doc_name/page_number of
+        every returned chunk.
+        """
+        import json
+        from qdrant_client.models import Distance, VectorParams, PointStruct
+        from app.audit.logger import AuditLogger
+        from app.rag.embedder import Embedder
+        from app.rag.store import make_chunk_id
+        from app.tools.rag_search import RagSearchTool
+
+        DIM = 1024
+        audit_log = tmp_path / "audit.jsonl"
+        audit = AuditLogger(log_path=audit_log)
+
+        store = _make_in_memory_store()
+        store._client.create_collection(
+            "test_col",
+            vectors_config=VectorParams(size=DIM, distance=Distance.COSINE),
+        )
+
+        point_id = make_chunk_id("env_report.pdf", 5, 0)
+        store._client.upsert(
+            collection_name="test_col",
+            points=[
+                PointStruct(
+                    id=point_id,
+                    vector=[0.1] * DIM,
+                    payload={
+                        "text": "Environmental compliance chapter.",
+                        "source": "/kb/mrpl_public/env_report.pdf",
+                        "doc_name": "env_report.pdf",
+                        "source_category": "mrpl_public",
+                        "page_number": 5,
+                        "status": "in_force",
+                        "confidentiality": "public",
+                        "edition_date": None,
+                    },
+                )
+            ],
+        )
+
+        fake_client = FakeEmbeddingClient()
+        embedder = Embedder(fake_client)
+        tool = RagSearchTool(store=store, embedder=embedder, audit_logger=audit)
+
+        request_id = "test-retrieval-audit-001"
+        result = _run(
+            tool.execute(
+                query="environmental compliance",
+                collection="test_col",
+                request_id=request_id,
+            )
+        )
+
+        assert result.success is True, f"Tool failed: {result.error}"
+
+        # Parse audit log
+        records = [
+            json.loads(line)
+            for line in audit_log.read_text().splitlines()
+            if line.strip()
+        ]
+        retrieval_records = [
+            r for r in records
+            if r.get("event_type") == "rag_retrieval"
+            and r.get("request_id") == request_id
+        ]
+        assert len(retrieval_records) >= 1, (
+            "Expected at least one rag_retrieval audit record with the correct request_id"
+        )
+
+        rec = retrieval_records[0]
+        payload = rec["payload"]
+
+        # Must contain query
+        assert "environmental compliance" in payload["query"]
+
+        # Must contain source attribution (doc_name + page_number)
+        assert "sources" in payload
+        assert len(payload["sources"]) >= 1
+        source = payload["sources"][0]
+        assert source["doc_name"] == "env_report.pdf"
+        assert source["page_number"] == 5
+
+
+# ---------------------------------------------------------------------------
+# 24. Orchestrator — 2-step plan with rag_search as registered tool
+# ---------------------------------------------------------------------------
+
+
+class TestOrchestratorWithRagSearch:
+    def test_orchestrator_can_call_rag_search(self, tmp_path):
+        """
+        Register a RagSearchTool (backed by in-memory Qdrant) alongside
+        the normal TOOL_REGISTRY, give FakeOllamaClient a plan that calls
+        rag_search, and verify the orchestrator completes with COMPLETED status.
+
+        This test validates that:
+        1. The orchestrator's tool interface is generic enough to accept rag_search.
+        2. The 2-step flow (plan → act → synthesise) works end-to-end.
+        3. The final output references the retrieved doc (or at least reports
+           a successful run).
+        """
+        import json
+        from dataclasses import dataclass
+        from typing import Any, Optional
+        from qdrant_client.models import Distance, VectorParams, PointStruct
+
+        from app.audit.logger import AuditLogger
+        from app.orchestrator.orchestrator import Orchestrator
+        from app.orchestrator.state import OrchestratorStatus
+        from app.rag.embedder import Embedder
+        from app.rag.store import make_chunk_id
+        from app.tools.rag_search import RagSearchTool
+        from app.tools.registry import register_tool, TOOL_REGISTRY
+
+        @dataclass
+        class FakeResponse:
+            content: str
+            prompt_tokens: int = 5
+            response_tokens: int = 5
+            total_tokens: int = 10
+            latency_ms: float = 1.0
+            model_name: str = "fake"
+            ollama_tag: str = "fake:latest"
+            request_id: str = "fake-rid"
+
+        class FakeOllamaClient:
+            def __init__(self, responses):
+                self._responses = responses
+                self._idx = 0
+
+            async def chat_completion(self, messages, *, request_id=None,
+                                      temperature=0.0, max_tokens=16,
+                                      extra_body=None):
+                idx = min(self._idx, len(self._responses) - 1)
+                content = self._responses[idx]
+                self._idx += 1
+                return FakeResponse(content=content)
+
+        DIM = 1024
+        store = _make_in_memory_store()
+        store._client.create_collection(
+            "docs",
+            vectors_config=VectorParams(size=DIM, distance=Distance.COSINE),
+        )
+
+        point_id = make_chunk_id("oisd_standards.pdf", 3, 0)
+        store._client.upsert(
+            collection_name="docs",
+            points=[
+                PointStruct(
+                    id=point_id,
+                    vector=[0.1] * DIM,
+                    payload={
+                        "text": "OISD standard 118 covers pressure vessel inspection.",
+                        "source": "/kb/oisd_standards/oisd_standards.pdf",
+                        "doc_name": "oisd_standards.pdf",
+                        "source_category": "oisd_standards",
+                        "page_number": 3,
+                        "status": "in_force",
+                        "confidentiality": "public",
+                        "edition_date": None,
+                    },
+                )
+            ],
+        )
+
+        fake_embedding = FakeEmbeddingClient()
+        embedder = Embedder(fake_embedding)
+        audit_log = tmp_path / "audit.jsonl"
+        audit = AuditLogger(log_path=audit_log)
+
+        tool = RagSearchTool(store=store, embedder=embedder, audit_logger=audit)
+        # Register in the live TOOL_REGISTRY so orchestrator can find it
+        register_tool(tool)
+
+        plan_json = json.dumps([
+            {
+                "step_index": 0,
+                "tool_name": "rag_search",
+                "tool_args": {
+                    "query": "pressure vessel inspection standard",
+                    "collection": "docs",
+                },
+                "description": "Search for OISD pressure vessel standard",
+            }
+        ])
+        synthesis_text = (
+            "Per OISD standard 118 (oisd_standards.pdf, page 3), "
+            "pressure vessels must be inspected annually."
+        )
+
+        fake_llm = FakeOllamaClient(responses=[plan_json, synthesis_text])
+        orch = Orchestrator(llm_client=fake_llm, audit_logger=audit)
+
+        run = _run(
+            orch.run(
+                "What does OISD say about pressure vessel inspection?",
+                request_id="orch-rag-001",
+            )
+        )
+
+        assert run.status == OrchestratorStatus.COMPLETED, (
+            f"Expected COMPLETED, got {run.status}. Failure: {run.failure_summary}"
+        )
+        assert len(run.outcomes) >= 1
+        assert run.outcomes[0].success is True, (
+            f"rag_search step failed: {run.outcomes[0].error}"
+        )
+        assert run.final_output is not None

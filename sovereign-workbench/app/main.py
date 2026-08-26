@@ -142,8 +142,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 audit_logger=_audit_logger,
             )
             # Register the RAG search tool with the orchestrator's registry.
-            register_tool(RagSearchTool(store=_vector_store, embedder=embedder))
-            _log.info("RAG pipeline ready (Qdrant + bge-m3)")
+            # Pass audit_logger so every retrieval call is logged (RAG_RETRIEVAL).
+            register_tool(
+                RagSearchTool(
+                    store=_vector_store,
+                    embedder=embedder,
+                    audit_logger=_audit_logger,
+                )
+            )
+            _log.info("RAG pipeline ready (Qdrant + bge-m3) — rag_search tool registered")
+
         except ImportError as exc:
             _log.warning(
                 "RAG dependencies not installed (%s) — /ingest and /rag/search disabled.  "

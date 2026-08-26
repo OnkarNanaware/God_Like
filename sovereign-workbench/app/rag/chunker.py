@@ -156,3 +156,83 @@ def chunk_pdf(
         skipped_pages,
     )
     return all_chunks
+
+
+def chunk_pdf_paged(
+    path: Path | str,
+    chunk_size: int = _DEFAULT_CHUNK_SIZE,
+    overlap: int = _DEFAULT_OVERLAP,
+) -> list[tuple[str, int, int]]:
+    """
+    Extract text from a PDF and return chunks annotated with page provenance.
+
+    Unlike :func:`chunk_pdf`, this function preserves per-page origin so the
+    ingestion pipeline can store ``page_number`` in Qdrant metadata and later
+    surface it in citations ("per MRPL Environment Report, page 12").
+
+    Parameters
+    ----------
+    path:
+        Absolute or relative path to the PDF file.
+    chunk_size, overlap:
+        Passed through to :func:`chunk_text`.
+
+    Returns
+    -------
+    List of ``(chunk_text, page_number, chunk_index_within_page)`` tuples.
+    ``page_number`` is 1-indexed (matches human-readable PDF page numbers).
+
+    Raises
+    ------
+    ImportError        if pymupdf is not installed.
+    FileNotFoundError  if the PDF does not exist.
+    RuntimeError       if the PDF cannot be opened.
+    """
+    try:
+        import fitz  # pymupdf
+    except ImportError as exc:
+        raise ImportError(
+            "pymupdf is required for PDF chunking.  "
+            "Install it with:  pip install pymupdf"
+        ) from exc
+
+    pdf_path = Path(path)
+    if not pdf_path.exists():
+        raise FileNotFoundError(f"PDF not found: {pdf_path}")
+
+    try:
+        doc = fitz.open(str(pdf_path))
+    except Exception as exc:
+        raise RuntimeError(f"Could not open PDF '{pdf_path}': {exc}") from exc
+
+    results: list[tuple[str, int, int]] = []
+    skipped_pages = 0
+
+    try:
+        for page_num, page in enumerate(doc, start=1):
+            page_text = page.get_text("text")  # type: ignore[attr-defined]
+            if not page_text or not page_text.strip():
+                skipped_pages += 1
+                _log.debug("Page %d has no extractable text — skipping", page_num)
+                continue
+            page_chunks = chunk_text(page_text, chunk_size=chunk_size, overlap=overlap)
+            for chunk_idx, chunk in enumerate(page_chunks):
+                results.append((chunk, page_num, chunk_idx))
+    finally:
+        doc.close()
+
+    if skipped_pages:
+        _log.warning(
+            "%d page(s) in '%s' had no extractable text (possibly scanned). "
+            "Use the vision pipeline for OCR on those pages.",
+            skipped_pages,
+            pdf_path.name,
+        )
+
+    _log.info(
+        "chunk_pdf_paged '%s': %d chunks across pages (%d page(s) skipped)",
+        pdf_path.name,
+        len(results),
+        skipped_pages,
+    )
+    return results
