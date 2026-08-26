@@ -150,7 +150,10 @@ class Ingestor:
             chunks=chunks,
             vectors=vectors,
             source=str(path),
-            extra_metadata={"source_sha256": source_sha256},
+            extra_metadata={
+                "source_sha256": source_sha256,
+                "doc_name": Path(path).name,
+            },
         )
 
         duration_ms = (time.monotonic() - t0) * 1000.0

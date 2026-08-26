@@ -16,6 +16,7 @@ logs/
 *.jsonl
 uploads/
 qdrant_data/
+qdrant_storage/
 
 # Secrets
 *.pem
