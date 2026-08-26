@@ -1,0 +1,150 @@
+.root{--bg-color:#05060a}
+@import url('https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,400;0,500;0,600;0,700;0,800&display=swap');
+:root{
+  --bg:#05060a;
+  --panel:rgba(255,255,255,0.04);
+  --muted:#9aa4c0;
+  --accent:#5b6bff;
+  --accent-2:#7b5bff;
+}
+*{box-sizing:border-box}
+html,body,#root{width:100%;height:100%;margin:0;overflow:hidden}
+body{margin:0;font-family:Inter, sans-serif;background:var(--bg);color:#eaf1ff;font-weight:400;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+
+/* Enforce Inter for UI elements */
+body, button, input, textarea, select, a { font-family: Inter, sans-serif; }
+.app{width:100%;height:100vh;min-height:100vh;position:relative;overflow:hidden;display:flex}
+.cosmic{position: absolute; inset:0; z-index:0; pointer-events:none}
+.cosmic .planet-background{position:absolute;inset:0;background-image:url('/assets/planet-background.jpg');background-repeat:no-repeat;background-size:cover;background-position:center 60%;opacity:1;filter:contrast(1.08) brightness(1.03) saturate(1.12);pointer-events:none;z-index:0}
+.cosmic .planet-background::after{content:'';position:absolute;inset:0;background:linear-gradient(180deg, rgba(2,6,20,0.08) 0%, rgba(2,6,20,0.04) 50%, rgba(2,6,20,0.18) 100%);pointer-events:none;z-index:1}
+.cosmic .stars{position:absolute;inset:0;background-image:radial-gradient(rgba(255,255,255,0.02) 1px, transparent 2px);background-size:12px 12px;opacity:0.6;z-index:2}
+
+.ui-shell{position:relative; display:flex; gap:0; z-index:5; height:100vh; align-items:stretch; transition:all .28s ease; width:100%}
+.ui-shell.sidebar-closed{--sidebar-width:0px}
+
+.ui-shell.sidebar-closed .sidebar{flex:0 0 0 !important;width:0 !important;padding:0 !important;border-right:0 !important;overflow:hidden;pointer-events:none}
+.ui-shell.sidebar-closed .sidebar *{visibility:hidden}
+
+.ui-shell > aside, .ui-shell > main{min-height:0;min-width:0}
+.ui-shell > main{height:100% ; overflow:hidden;flex:1;display:flex;flex-direction:column}
+
+/* Sidebar */
+.sidebar{flex:0 0 var(--sidebar-width,280px);width:var(--sidebar-width,280px);min-width:0;height:100%;background:linear-gradient(180deg, rgba(8,10,16,0.95), rgba(6,8,14,0.95));border-right:1px solid rgba(255,255,255,0.04);padding:14px 12px;box-shadow: inset -6px 0 18px rgba(8,10,20,0.55);color:var(--muted);display:flex;flex-direction:column;overflow:hidden;transition:flex .28s ease,width .28s ease, padding .28s ease}
+.sidebar.closed{transform:translateX(-110%);opacity:0}
+.sidebar .sidebar-top{display:flex;align-items:center;gap:12px;justify-content:space-between;padding-bottom:6px}
+.hamburger{background:transparent;border:0;color:var(--muted);font-size:18px;cursor:pointer}
+.brand{display:flex;align-items:center;gap:10px;cursor:pointer}
+.logo{width:36px;height:36px;border-radius:12px;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,var(--accent),var(--accent-2));box-shadow:0 6px 18px rgba(91,107,255,0.08);font-weight:700}
+.logo-img{width:34px;height:34px;border-radius:8px;object-fit:cover}
+.title{font-weight:700;color:#f3f7ff;font-size:15px}
+.sidebar-actions{margin-top:12px;display:flex;gap:10px;align-items:center}
+.btn.new-chat{flex:1;padding:8px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.04);background:transparent;color:#eaf1ff;font-weight:600;cursor:pointer;text-align:left}
+.sidebar-actions .icon-btn{width:36px;height:36px;border-radius:8px;border:1px solid rgba(255,255,255,0.03);background:transparent;color:var(--muted);display:inline-flex;align-items:center;justify-content:center;cursor:pointer}
+.search input{width:100%;margin-top:10px;padding:10px;border-radius:8px;border:1px solid rgba(255,255,255,0.03);background:rgba(255,255,255,0.02);color:var(--muted);outline:none}
+.conversations{margin-top:12px;flex:1;overflow:auto;padding-right:6px;min-height:0}
+.group-title{font-size:12px;color:var(--muted);margin:10px 0 6px;padding-left:6px}
+.conv{display:flex;align-items:center;justify-content:space-between;width:100%;text-align:left;padding:8px 6px;height:40px;border-radius:6px;border:0;background:transparent;color:#eaf1ff;cursor:pointer}
+.conv .conv-left{display:flex;gap:10px;align-items:center;min-width:0}
+.conv .icon{width:24px;height:24px;border-radius:6px;background:transparent;display:inline-flex;align-items:center;justify-content:center;color:var(--muted);font-size:14px}
+.conv:hover{background:rgba(255,255,255,0.02)}
+.conv .three{opacity:0;color:var(--muted);padding-left:8px}
+.conv:hover .three{opacity:1}
+.conv.active{background:linear-gradient(90deg, rgba(91,107,255,0.04), rgba(123,91,255,0.03));border-radius:6px}
+.sidebar-bottom{margin-top:12px;border-top:1px solid rgba(255,255,255,0.03);padding-top:12px}
+.link{background:transparent;border:0;color:var(--muted);text-align:left;padding:8px;cursor:pointer}
+.sidebar-user{margin-top:auto;padding-top:12px;border-top:1px solid rgba(255,255,255,0.02);display:flex;align-items:center;gap:10px}
+.avatar-circle{width:36px;height:36px;border-radius:999px;background:linear-gradient(90deg,#7b5bff,#5b6bff);display:flex;align-items:center;justify-content:center;color:white;font-weight:700;font-size:14px}
+
+/* Chat window */
+.chat-window{flex:1;display:flex;flex-direction:column;box-sizing:border-box;background:transparent;padding:0;margin:0;min-height:0}
+.chat-header{display:flex;align-items:center;gap:12px;padding:18px 28px;border-bottom:1px solid rgba(255,255,255,0.02);background:transparent}
+.chat-header .brand-left{display:flex;align-items:center;gap:12px;color:#eaf1ff;font-weight:700}
+.chat-header .brand-left .version{color:var(--muted);font-weight:600;font-size:13px}
+.header-right{margin-left:auto;display:flex;align-items:center;gap:12px}
+.upgrade-btn{padding:8px 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.04);background:linear-gradient(90deg, rgba(91,107,255,0.06), rgba(123,91,255,0.04));color:#eaf1ff;cursor:pointer}
+.user-avatar-small{width:40px;height:40px;border-radius:999px;background:linear-gradient(90deg,#7b5bff,#5b6bff);display:flex;align-items:center;justify-content:center;color:white}
+.chat-body{flex:1;padding:28px 60px;overflow:auto;min-height:0}
+.message{margin-bottom:12px;display:flex}
+.message.assistant .bubble{background:linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.02));padding:12px;border-radius:10px;color:#dbe8ff;font-weight:400}
+.message.user{justify-content:flex-end}
+.message.user .bubble{background:linear-gradient(90deg,var(--accent),var(--accent-2));padding:12px;border-radius:10px;color:white;font-weight:500}
+.message .bubble .text{white-space:pre-wrap}
+
+.composer{display:flex;flex-direction:column;gap:12px;align-items:stretch;padding:18px;background:rgba(6,8,16,0.6);border-radius:18px;border:1px solid rgba(255,255,255,0.04);backdrop-filter:blur(8px);max-width:920px;margin:18px auto 24px;position:relative}
+.composer .composer-row{display:flex;align-items:flex-end;gap:12px}
+.composer textarea{width:100%;min-height:120px;max-height:320px;padding:18px;border-radius:12px;border:0;background:transparent;color:#eaf1ff;resize:auto;overflow:auto;font-size:15px;line-height:1.45}
+.composer .controls{display:flex;align-items:center;gap:12px}
+.composer .icon{background:transparent;border:0;color:var(--muted);cursor:pointer;font-size:20px}
+.composer .send{background:linear-gradient(90deg,var(--accent),var(--accent-2));border:0;color:white;padding:10px 14px;border-radius:999px;cursor:pointer}
+.composer .icon{background:transparent;border:0;color:var(--muted);cursor:pointer}
+.composer .send{background:linear-gradient(90deg,var(--accent),var(--accent-2));border:0;color:white;padding:10px 14px;border-radius:999px;cursor:pointer}
+
+/* Help FAB */
+.help-fab{position:fixed;right:22px;bottom:18px;width:44px;height:44px;border-radius:999px;border:0;background:linear-gradient(90deg,#2b1b4b,#5b6bff);color:white;font-weight:700;z-index:100;cursor:pointer;box-shadow:0 8px 24px rgba(11,12,20,0.6)}
+
+/* Empty state */
+.empty-state{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:48px 20px;color:#dce8ff}
+.empty-state h1{font-size:clamp(48px,8vw,120px);letter-spacing:-1.5px;margin:0;background:linear-gradient(90deg,#ffffff,#cdb8ff);-webkit-background-clip:text;background-clip:text;color:transparent;text-shadow:0 12px 60px rgba(123,91,255,0.12);font-weight:800}
+.empty-state .lead{color:var(--muted);max-width:56ch;text-align:center;margin-top:18px;font-size:18px}
+.suggestions{margin-top:28px;display:flex;gap:14px;flex-wrap:wrap}
+.chip{min-width:160px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.03);padding:14px 18px;border-radius:12px;color:#eaf1ff;cursor:pointer;display:flex;flex-direction:column;align-items:flex-start;gap:6px}
+
+.empty-state{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:48px 20px;color:#dce8ff}
+.moon-visual{display:none}
+
+/* Scrollbar styling for dark theme (internal scroll containers only) */
+.conversations::-webkit-scrollbar, .chat-body::-webkit-scrollbar{width:8px;height:8px}
+.conversations::-webkit-scrollbar-track, .chat-body::-webkit-scrollbar-track{background:transparent}
+.conversations::-webkit-scrollbar-thumb, .chat-body::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.12);border-radius:999px}
+.conversations{scrollbar-width:thin;scrollbar-color:rgba(255,255,255,0.12) transparent}
+.chat-body{scrollbar-width:thin;scrollbar-color:rgba(255,255,255,0.12) transparent}
+
+/* Ensure composer is anchored near bottom and does not cause page scroll */
+.chat-window > div[style], .chat-window > .composer-wrapper{display:flex;flex-direction:column;align-items:center;padding:12px 20px 28px;z-index:6}
+.composer{width:100%;display:flex;align-items:center;gap:12px}
+.composer.compact{max-width:clamp(650px,60vw,800px);margin:8px auto 8px;padding:10px 14px;border-radius:12px;background:rgba(6,8,16,0.48);border:1px solid rgba(255,255,255,0.04);backdrop-filter:blur(6px)}
+.composer.compact textarea{flex:1;min-height:65px;max-height:80px;padding:12px;border-radius:8px;border:1px solid rgba(255,255,255,0.03);background:transparent;color:#eaf1ff;resize:none;overflow:auto;font-size:15px;line-height:1.3;outline:none}
+.composer.compact textarea{ -webkit-appearance:none; appearance:none }
+.composer.compact textarea:focus{outline:none !important;box-shadow:0 0 0 3px rgba(91,107,255,0.06) !important;border-color:rgba(91,107,255,0.14) !important}
+.composer.compact textarea:focus-visible{outline:none !important;box-shadow:0 0 0 3px rgba(123,91,255,0.08) !important}
+.composer.compact textarea::-webkit-resizer{display:none}
+.composer.compact textarea::-moz-resize{display:none}
+.composer.compact textarea::-webkit-focus-ring-color{outline:none}
+.composer.compact textarea:focus, .composer.compact textarea:focus-visible, .composer.compact textarea:active {
+  outline: none !important;
+  -webkit-box-shadow: none !important;
+  box-shadow: none !important;
+}
+.composer.compact:focus-within {
+  outline: none !important;
+  box-shadow: none !important;
+}
+.composer.compact textarea{outline-color:transparent !important;-webkit-focus-ring-color: transparent !important}
+.composer.compact textarea::-moz-focus-inner{border:0}
+.composer.compact textarea:-moz-focusring{outline:none}
+.composer.compact .controls.right{display:flex;gap:8px;align-items:center}
+.composer.compact .icon{background:transparent;border:0;color:var(--muted);cursor:pointer;font-size:18px}
+.composer.compact .send{background:linear-gradient(90deg,var(--accent),var(--accent-2));border:0;color:white;padding:8px 12px;border-radius:999px;cursor:pointer}
+
+/* Planet should not affect layout */
+.cosmic, .cosmic svg{pointer-events:none;user-select:none}
+
+/* Agent activity */
+.agent-activity{background:rgba(255,255,255,0.02);padding:12px;border-radius:10px;margin:8px 0}
+.agent-activity ul{list-style:none;padding:0;margin:8px 0}
+.agent-activity li{display:flex;align-items:center;gap:8px;padding:6px 0}
+.agent-activity .dot{width:22px;height:22px;border-radius:6px;display:inline-flex;align-items:center;justify-content:center;background:rgba(255,255,255,0.03)}
+
+/* Modal */
+.modal-overlay{position:fixed;inset:0;background:linear-gradient(0deg, rgba(2,6,20,0.6), rgba(2,6,20,0.4));display:flex;align-items:center;justify-content:center;z-index:40}
+.modal{background:rgba(10,12,20,0.9);padding:18px;border-radius:12px;min-width:320px;border:1px solid rgba(255,255,255,0.03)}
+
+/* Profile */
+.profile-menu{position:fixed;right:40px;top:60px;background:rgba(6,8,16,0.95);padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,0.03);z-index:50}
+
+/* Responsive */
+@media (max-width: 800px){
+  .ui-shell{padding:12px}
+  .sidebar{position:fixed;left:12px;top:12px;bottom:12px;z-index:60}
+  .chat-window{margin-left:0}
+}
