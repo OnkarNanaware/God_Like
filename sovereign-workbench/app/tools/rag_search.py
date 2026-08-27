@@ -25,7 +25,7 @@ Input schema
 ------------
 {
     "query":           required str  — natural language query
-    "collection":      optional str  — target collection (default: "docs")
+    "collection":      optional str  — target collection (default: "sovereign_knowledge_base")
     "top_k":           optional int  — max results (default: 5)
     "source_category": optional str  — filter to one category folder
 }
@@ -57,7 +57,7 @@ from app.tools.base import BaseTool, ToolResult
 
 _log = logging.getLogger("sovereign.tools.rag_search")
 
-_DEFAULT_COLLECTION = "docs"
+_DEFAULT_COLLECTION = "sovereign_knowledge_base"
 _DEFAULT_TOP_K = 5
 
 

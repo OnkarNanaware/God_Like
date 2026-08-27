@@ -165,39 +165,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     audit_logger=_audit_logger,
                 )
             )
-            # NOTE: VisionExtractTool (stub from app.tools.vision) is intentionally
-            # NOT registered here — the real implementation is registered below after
-            # the vision OllamaClient is initialised.
             _log.info("RAG pipeline ready — qdrant_storage=%s", _QDRANT_STORAGE)
-
-            # ── Vision client + VisionExtractTool (Phase D) ────────────
-            # Resolve the vision model from the tier resolver output; fall
-            # back to the small 3b vision model if the resolver did not
-            # select one (e.g. CPU-only / low-VRAM machine).
-            # IMPORTANT: Only app.tools.vision_extract is used — the stub
-            # in app.tools.vision is legacy code and must NOT be registered.
-            from app.tools.vision_extract import VisionExtractTool
-            vision_model_name = resolved.get("vision", _DEFAULT_VISION_MODEL_NAME)
-            if vision_model_name not in MODEL_REGISTRY:
-                vision_model_name = _DEFAULT_VISION_MODEL_NAME
-                _log.warning(
-                    "Resolved vision model not in registry — falling back to %s",
-                    vision_model_name,
-                )
-            _vision_client = OllamaClient(
-                model_name=vision_model_name,
-                audit_logger=_audit_logger,
-            )
-            register_tool(
-                VisionExtractTool(
-                    llm_client=_vision_client,
-                    audit_logger=_audit_logger,
-                )
-            )
-            _log.info(
-                "Vision pipeline ready (%s) — vision_extract tool registered",
-                vision_model_name,
-            )
 
         except ImportError as exc:
             _log.warning(
@@ -211,6 +179,51 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 "/ingest and /rag/search will fail at request time",
                 exc,
             )
+
+    # ── Vision client + VisionExtractTool (INDEPENDENT of Qdrant) ──────────────
+    # This block is intentionally separate from the Qdrant block above.
+    # A Qdrant failure must NOT prevent vision from registering, and a
+    # vision failure must NOT affect RAG. Each subsystem fails independently.
+    # IMPORTANT: Only app.tools.vision_extract is used — the legacy stub in
+    # app.tools.vision is never registered.
+    try:
+        from app.tools.registry import register_tool  # idempotent re-import
+        from app.tools.vision_extract import VisionExtractTool
+
+        # Resolve the vision model from the tier resolver output; fall back to
+        # the small 3b vision model if the resolver did not select one.
+        vision_model_name = resolved.get("vision", _DEFAULT_VISION_MODEL_NAME)
+        if vision_model_name not in MODEL_REGISTRY:
+            vision_model_name = _DEFAULT_VISION_MODEL_NAME
+            _log.warning(
+                "Resolved vision model not in registry — falling back to %s",
+                vision_model_name,
+            )
+        _vision_client = OllamaClient(
+            model_name=vision_model_name,
+            audit_logger=_audit_logger,
+        )
+        register_tool(
+            VisionExtractTool(
+                llm_client=_vision_client,
+                audit_logger=_audit_logger,
+            )
+        )
+        _log.info(
+            "Vision pipeline ready (%s) — vision_extract tool registered (independent of Qdrant)",
+            vision_model_name,
+        )
+    except ImportError as exc:
+        _log.warning(
+            "VisionExtractTool dependencies not installed (%s) — vision_extract unavailable. "
+            "Run: pip install pdf2image Pillow",
+            exc,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "VisionExtractTool registration failed (%s) — vision_extract unavailable",
+            exc,
+        )
 
     # ── Phase E: Orchestrator singleton ───────────────────────────────
     try:
@@ -367,7 +380,7 @@ class IngestResponse(BaseModel):
 
 class RagSearchRequest(BaseModel):
     query: str = Field(..., description="Natural-language query.")
-    collection: str = Field(default="docs", description="Target Qdrant collection.")
+    collection: str = Field(default="sovereign_knowledge_base", description="Target Qdrant collection.")
     top_k: int = Field(default=5, ge=1, le=20, description="Max results.")
     request_id: Optional[str] = Field(default=None)
 

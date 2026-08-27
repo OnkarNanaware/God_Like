@@ -114,7 +114,7 @@ def _pass_or_fail(
 
 
 async def run_eval(
-    collection: str = "docs",
+    collection: str = "sovereign_knowledge_base",
     eval_yaml_path: Optional[Path] = None,
     top_k: int = EVAL_TOP_K,
 ) -> dict[str, Any]:
@@ -265,7 +265,7 @@ if __name__ == "__main__":
         stream=sys.stdout,
     )
 
-    _collection = os.environ.get("RAG_COLLECTION", "docs")
+    _collection = os.environ.get("RAG_COLLECTION", "sovereign_knowledge_base")
     _eval_path_env = os.environ.get("EVAL_SET")
     _eval_path = Path(_eval_path_env) if _eval_path_env else None
 
