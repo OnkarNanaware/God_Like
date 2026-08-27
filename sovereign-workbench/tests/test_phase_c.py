@@ -106,25 +106,32 @@ class TestGpuDetect:
         return detect_gpu
 
     def test_no_gpu_returns_zeroed_dict(self):
+        """When nvidia-smi is absent, detect_gpu must return _NO_GPU."""
         detect_gpu = self._import()
-        with patch("subprocess.run", side_effect=FileNotFoundError("nvidia-smi not found")):
-            info = detect_gpu()
+        # Force Linux platform so the nvidia-smi path runs (not sysctl).
+        with patch("platform.system", return_value="Linux"):
+            with patch("subprocess.run", side_effect=FileNotFoundError("nvidia-smi not found")):
+                info = detect_gpu()
         assert info["gpu_available"] is False
         assert info["total_vram_mb"] == 0
         assert info["free_vram_mb"] == 0
         assert info["device_name"] == ""
 
     def test_parses_nvidia_smi_csv(self):
+        """nvidia-smi CSV output is parsed correctly into GpuInfo."""
         detect_gpu = self._import()
         fake_result = MagicMock()
         fake_result.returncode = 0
         fake_result.stdout = "24564, 20000, NVIDIA RTX 4090\n"
-        with patch("subprocess.run", return_value=fake_result):
-            info = detect_gpu()
+        # Force Linux platform so the nvidia-smi path runs (not sysctl).
+        with patch("platform.system", return_value="Linux"):
+            with patch("subprocess.run", return_value=fake_result):
+                info = detect_gpu()
         assert info["gpu_available"] is True
         assert info["total_vram_mb"] == 24564
         assert info["free_vram_mb"] == 20000
         assert "4090" in info["device_name"]
+
 
 
 # ---------------------------------------------------------------------------

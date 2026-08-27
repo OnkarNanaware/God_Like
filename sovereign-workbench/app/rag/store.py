@@ -16,11 +16,21 @@ Design decisions
   stable UUIDs derived from ``sha256(doc_name + page + chunk_idx)[:16]``.
   Re-running ingestion therefore *updates* rather than *duplicates* points.
 
+Embedded (no-Docker) mode
+--------------------------
+Pass ``storage_path`` to :class:`VectorStore` to run Qdrant fully in-process
+(no Docker, no external daemon).  The directory is created automatically.
+This is the default for local development on macOS.
+
+Network mode
+------------
+Omit ``storage_path`` (or pass ``None``) to connect to a running Qdrant
+server at ``localhost:6333``.  Used in production or Docker deployments.
+
 Sovereignty note
 ----------------
-Qdrant is always reached at ``localhost:6333``.  The client is created with
-``prefer_grpc=False`` to keep traffic on plain HTTP/REST (avoids gRPC
-certificate edge-cases in offline environments).
+Qdrant is always reached at ``localhost`` (embedded or TCP).  No external
+network calls are made.
 """
 
 from __future__ import annotations
@@ -102,13 +112,20 @@ class VectorStore:
     Parameters
     ----------
     host, port:
-        Qdrant server address.  Always localhost in the sovereign workbench.
+        Qdrant server address — used only when ``storage_path`` is ``None``.
+        Always localhost in the sovereign workbench.
+    storage_path:
+        If provided, Qdrant runs fully in-process ("embedded" / local mode)
+        using this directory as its data store.  No Docker, no daemon required.
+        This is the preferred mode for macOS local development.
+        Pass ``None`` (default) to connect to a network Qdrant instance.
     """
 
     def __init__(
         self,
         host: str = _QDRANT_HOST,
         port: int = _QDRANT_PORT,
+        storage_path: "Optional[Path | str]" = None,
     ) -> None:
         try:
             from qdrant_client import QdrantClient  # type: ignore[import]
@@ -117,8 +134,14 @@ class VectorStore:
                 "qdrant-client is required.  Install with:  pip install qdrant-client"
             ) from exc
 
-        self._client = QdrantClient(host=host, port=port, prefer_grpc=False)
-        _log.info("VectorStore connected to Qdrant at %s:%d", host, port)
+        if storage_path is not None:
+            # Embedded (in-process) mode — no Docker, no network daemon.
+            self._client = QdrantClient(path=str(storage_path))
+            _log.info("VectorStore using embedded Qdrant at path: %s", storage_path)
+        else:
+            # Network mode — connects to Qdrant at host:port.
+            self._client = QdrantClient(host=host, port=port, prefer_grpc=False)
+            _log.info("VectorStore connected to Qdrant at %s:%d", host, port)
 
     # ------------------------------------------------------------------
     # Collection management

@@ -1,24 +1,36 @@
 """
 hardware/gpu_detect.py
 ======================
-Lightweight GPU detection using only stdlib ``subprocess``.
+Platform-aware GPU / unified-memory detection using only stdlib
+``subprocess``.  No heavy dependencies (no torch, no pynvml).
 
-No heavy dependencies (no torch, no pynvml).  Calls ``nvidia-smi`` once;
-if the binary is absent or returns nothing, returns a zeroed-out dict.
+Three detection paths
+---------------------
+1. **macOS (Apple Silicon):** ``sysctl hw.memsize`` → total unified memory.
+   50 % of total RAM is reported as ``free_vram_mb`` — a conservative
+   budget that reserves headroom for the OS and other apps.
+   ``gpu_available = True`` so the tier resolver uses the budget instead
+   of falling back to the zero-budget CPU path.
+
+2. **Linux/Windows + NVIDIA present:** ``nvidia-smi`` CSV query (unchanged
+   from the original implementation).
+
+3. **Neither detected:** Returns the zeroed :data:`_NO_GPU` dict and the
+   tier resolver falls back to the smallest (CPU-friendly) model tier.
 
 Return schema
 -------------
 {
     "gpu_available" : bool,
-    "total_vram_mb" : int,   # 0 when no GPU
-    "free_vram_mb"  : int,   # 0 when no GPU
+    "total_vram_mb" : int,   # 0 when no GPU / unified memory
+    "free_vram_mb"  : int,   # effective budget (see per-path notes)
     "device_name"   : str,   # "" when no GPU
 }
 
 Sovereignty note
 ----------------
-This module never opens a socket.  ``subprocess.run`` only launches a
-local binary (``nvidia-smi``).
+This module never opens a socket.  All subprocess calls launch only
+local binaries (``sysctl``, ``nvidia-smi``).
 """
 
 from __future__ import annotations
@@ -45,6 +57,71 @@ _NO_GPU: GpuInfo = {
 }
 
 
+# ---------------------------------------------------------------------------
+# macOS / Apple Silicon path
+# ---------------------------------------------------------------------------
+
+
+def _detect_apple_silicon() -> GpuInfo:
+    """
+    Query total unified memory via ``sysctl hw.memsize`` (macOS only).
+
+    Apple Silicon GPUs share memory with the CPU.  There is no separate
+    "free VRAM" counter — the GPU competes with the OS, apps, and the CPU
+    for the same physical pool.
+
+    We report **50 % of total RAM** as ``free_vram_mb`` (the effective
+    budget passed to the tier resolver).  The tier resolver then applies
+    its own 85 % headroom on top, so the actual model-selection budget
+    is ≈ 42.5 % of installed RAM — conservative enough to avoid OOM
+    while still allowing mid-tier models on a 16 GB machine.
+
+    Returns :data:`_NO_GPU` if ``sysctl`` fails for any reason.
+    """
+    try:
+        result = subprocess.run(
+            ["sysctl", "hw.memsize"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            _log.warning(
+                "sysctl hw.memsize failed (rc=%d) — falling back to CPU tier",
+                result.returncode,
+            )
+            return _NO_GPU
+
+        # Typical output: "hw.memsize: 17179869184"
+        raw_bytes = int(result.stdout.strip().split(":")[-1].strip())
+        total_mb = raw_bytes // (1024 * 1024)
+
+        # 50 % budget: OS + background apps + other processes own the other half.
+        budget_mb = total_mb // 2
+
+        _log.info(
+            "macOS unified memory: total=%d MB  effective_budget=%d MB (50%% of pool)",
+            total_mb,
+            budget_mb,
+        )
+        return {
+            "gpu_available": True,
+            "total_vram_mb": total_mb,
+            "free_vram_mb": budget_mb,
+            "device_name": "Apple Silicon (unified memory)",
+        }
+
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        _log.warning("macOS memory detection failed (%s) — falling back to CPU tier", exc)
+        return _NO_GPU
+
+
+# ---------------------------------------------------------------------------
+# NVIDIA / Linux path (original implementation, unchanged)
+# ---------------------------------------------------------------------------
+
+
 def _run_nvidia_smi() -> str:
     """
     Execute ``nvidia-smi`` and return raw stdout.
@@ -52,7 +129,7 @@ def _run_nvidia_smi() -> str:
     Raises
     ------
     FileNotFoundError  if nvidia-smi is not on PATH.
-    subprocess.SubprocessError  for any other process error.
+    RuntimeError       if nvidia-smi exits non-zero.
     """
     result = subprocess.run(
         [
@@ -62,8 +139,8 @@ def _run_nvidia_smi() -> str:
         ],
         capture_output=True,
         text=True,
-        timeout=10,         # generous; never blocks indefinitely
-        check=False,        # we handle non-zero exit ourselves
+        timeout=10,     # generous; never blocks indefinitely
+        check=False,    # we handle non-zero exit ourselves
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -72,13 +149,11 @@ def _run_nvidia_smi() -> str:
     return result.stdout.strip()
 
 
-def detect_gpu() -> GpuInfo:
+def _detect_nvidia() -> GpuInfo:
     """
-    Detect the first available NVIDIA GPU.
+    Detect the first available NVIDIA GPU via ``nvidia-smi``.
 
-    Returns a :class:`GpuInfo` dict.  On any error (no GPU, no driver,
-    no nvidia-smi) returns :data:`_NO_GPU` and logs a WARNING — it never
-    raises so the caller's startup path remains unconditional.
+    Returns :data:`_NO_GPU` on any error (no GPU, no driver, no nvidia-smi).
     """
     try:
         raw = _run_nvidia_smi()
@@ -115,3 +190,32 @@ def detect_gpu() -> GpuInfo:
     except (RuntimeError, ValueError, OSError) as exc:
         _log.warning("GPU detection failed (%s) — falling back to CPU tier", exc)
         return _NO_GPU
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+
+
+def detect_gpu() -> GpuInfo:
+    """
+    Detect the best available compute memory budget for the current platform.
+
+    Branches
+    --------
+    * macOS  → :func:`_detect_apple_silicon` (``sysctl hw.memsize``)
+    * Other  → :func:`_detect_nvidia` (``nvidia-smi``)
+    * Either fails → :data:`_NO_GPU` CPU fallback
+
+    Returns a :class:`GpuInfo` dict.  Never raises — the caller's startup
+    path remains unconditional.
+    """
+    import platform as _platform
+
+    system = _platform.system()
+
+    if system == "Darwin":
+        return _detect_apple_silicon()
+
+    # Linux, Windows, or unknown → try nvidia-smi
+    return _detect_nvidia()

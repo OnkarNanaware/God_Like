@@ -145,17 +145,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             from app.rag.ingestor import Ingestor
             from app.rag.store import VectorStore
             from app.tools.rag_search import RagSearchTool
-            from app.tools.vision import VisionExtractTool
             from app.tools.registry import register_tool
 
-            _vector_store = VectorStore()          # localhost:6333
+            # Use embedded Qdrant (no Docker required) via qdrant_storage/ on disk.
+            _QDRANT_STORAGE = Path(__file__).resolve().parent.parent / "qdrant_storage"
+            _QDRANT_STORAGE.mkdir(parents=True, exist_ok=True)
+            _vector_store = VectorStore(storage_path=_QDRANT_STORAGE)
             embedder = Embedder(_embedding_client)
             _ingestor = Ingestor(
                 embedder=embedder,
                 store=_vector_store,
                 audit_logger=_audit_logger,
             )
-            # Register the RAG search and vision tools with the orchestrator's registry.
+            # Register the RAG search tool with the orchestrator's registry.
             register_tool(
                 RagSearchTool(
                     store=_vector_store,
@@ -163,17 +165,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     audit_logger=_audit_logger,
                 )
             )
-            register_tool(
-                VisionExtractTool(
-                    audit_logger=_audit_logger,
-                )
-            )
-            _log.info("RAG and Vision tools registered successfully")
+            # NOTE: VisionExtractTool (stub from app.tools.vision) is intentionally
+            # NOT registered here — the real implementation is registered below after
+            # the vision OllamaClient is initialised.
+            _log.info("RAG pipeline ready — qdrant_storage=%s", _QDRANT_STORAGE)
 
             # ── Vision client + VisionExtractTool (Phase D) ────────────
             # Resolve the vision model from the tier resolver output; fall
             # back to the small 3b vision model if the resolver did not
             # select one (e.g. CPU-only / low-VRAM machine).
+            # IMPORTANT: Only app.tools.vision_extract is used — the stub
+            # in app.tools.vision is legacy code and must NOT be registered.
             from app.tools.vision_extract import VisionExtractTool
             vision_model_name = resolved.get("vision", _DEFAULT_VISION_MODEL_NAME)
             if vision_model_name not in MODEL_REGISTRY:
