@@ -1,16 +1,21 @@
 import React from 'react'
 
-export const LogoIcon = ({ size = 22 }) => (
-  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <circle cx="12" cy="12" r="10" stroke="url(#logo_grad)" strokeWidth="2.5" />
-    <path d="M7 12C7 9.23858 9.23858 7 12 7C14.7614 7 17 9.23858 17 12C17 14.7614 14.7614 17 12 17" stroke="url(#logo_grad)" strokeWidth="2.5" strokeLinecap="round" />
-    <defs>
-      <linearGradient id="logo_grad" x1="2" y1="2" x2="22" y2="22" gradientUnits="userSpaceOnUse">
-        <stop stopColor="#c084fc" />
-        <stop offset="1" stopColor="#6366f1" />
-      </linearGradient>
-    </defs>
-  </svg>
+export const LogoIcon = ({ size = 22, className = '' }) => (
+  <img
+    src="/assets/sara-logo.png"
+    alt="SARA Logo"
+    width={size}
+    height={size}
+    className={className}
+    style={{
+      width: size,
+      height: size,
+      objectFit: 'contain',
+      display: 'inline-block',
+      verticalAlign: 'middle',
+      borderRadius: 4,
+    }}
+  />
 )
 
 export const HamburgerIcon = ({ size = 18 }) => (

@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;1,400;1,500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@600;700;800;900&family=Inter:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;1,400;1,500&display=swap');
 
 :root {
   --bg-dark: #06070d;
@@ -6,6 +6,7 @@
   --bg-card: rgba(12, 16, 26, 0.65);
   --bg-card-hover: rgba(22, 28, 44, 0.85);
   --bg-composer: rgba(10, 13, 22, 0.78);
+  --bg-panel: #0d101a;
   --bg-bubble-user: rgba(28, 34, 52, 0.75);
   --bg-bubble-agent: rgba(12, 16, 26, 0.7);
   
@@ -25,6 +26,7 @@
   --button-gradient: linear-gradient(90deg, #7b5bff 0%, #5b6bff 100%);
 
   --font-sans: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-brand: 'Orbitron', var(--font-sans);
 }
 
 * {
@@ -124,10 +126,11 @@ html, body, #root {
 }
 
 .brand-title {
-  font-weight: 700;
+  font-family: var(--font-sans);
+  font-weight: 800;
   font-size: 15px;
   color: var(--text-highlight);
-  letter-spacing: -0.2px;
+  letter-spacing: 0.8px;
 }
 
 .sidebar-new-chat-row {
@@ -597,6 +600,7 @@ html, body, #root {
 }
 
 .home-hero-title {
+  font-family: var(--font-sans);
   font-size: clamp(48px, 6.5vw, 76px);
   font-weight: 800;
   letter-spacing: -1.5px;
