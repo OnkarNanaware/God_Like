@@ -19,7 +19,7 @@ export default function UpgradeModal({ isOpen, onClose }) {
         <div className="modal-header">
           <div className="modal-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ color: 'var(--accent-purple)' }}><SparkleIcon size={18} /></span>
-            <span>Upgrade to Sa-Ra AI Pro</span>
+            <span>Upgrade to SARA Pro</span>
           </div>
           <button className="modal-close" onClick={onClose} aria-label="Close">
             <CloseIcon size={16} />
