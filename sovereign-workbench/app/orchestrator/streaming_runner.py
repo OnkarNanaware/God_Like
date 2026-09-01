@@ -243,6 +243,9 @@ def _build_augmented_plan_messages(
             f"{spreadsheet_block}"
         )
 
+    # _build_plan_messages already injects the KB AWARENESS block when kb_docs is
+    # provided (see orchestrator.py).  We don't need to duplicate it here; the
+    # CODE TASK RULE guard added there covers this path too.
     messages = _build_plan_messages(augmented_goal, kb_docs=kb_docs)
     return messages
 
@@ -294,6 +297,7 @@ async def run_with_streaming(
     attached_files: Optional[list[str]] = None,
     async_audit: Optional[AsyncAuditAdapter] = None,
     vector_store: Optional[Any] = None,
+    router: Optional[Any] = None,
 ) -> OrchestratorRun:
     """
     Run the orchestrator and push SSE events to *queue* at each transition.
@@ -323,6 +327,10 @@ async def run_with_streaming(
         and injected into the planning prompt as a KB AWARENESS block so the
         planner knows to call ``rag_search`` for questions about those documents
         instead of falling back to general knowledge.
+    router:
+        Optional :class:`~app.router.router.Router` instance. When provided,
+        routes the goal to the optimal model (e.g. coder LLM for coding tasks,
+        general text model for text/reasoning) before planning and synthesis.
 
     Returns
     -------
@@ -338,6 +346,53 @@ async def run_with_streaming(
         payload = {"action": action, "status": run.status.value, "goal_preview": goal[:120]}
         payload.update(extra)
         await async_audit.log_event(event_type, request_id=request_id, payload=payload)
+
+    # ── Model Routing: select the best model for this context ─────────────
+    routed_client = orchestrator._llm
+    capability_label: Optional[str] = None
+    if router is not None:
+        try:
+            decision = await router.route(
+                goal,
+                request_id=request_id,
+                attached_filenames=attached_files,
+            )
+            capability_label = decision.capability
+            from app.models.ollama_client import OllamaClient
+            if isinstance(orchestrator._llm, OllamaClient):
+                if getattr(orchestrator._llm, "_model_cfg", {}).get("name") == decision.model_name:
+                    routed_client = orchestrator._llm
+                else:
+                    routed_client = OllamaClient(
+                        model_name=decision.model_name,
+                        audit_logger=orchestrator._audit,
+                    )
+            else:
+                routed_client = orchestrator._llm
+            _push(
+                queue,
+                "model_routed",
+                request_id,
+                {
+                    "model_name": decision.model_name,
+                    "ollama_tag": decision.ollama_tag,
+                    "capability": decision.capability,
+                    "stage": decision.stage,
+                    "reason": decision.reason,
+                },
+            )
+            _log.info(
+                "Goal routed to model=%s capability=%s (request_id=%s)",
+                decision.model_name,
+                decision.capability,
+                request_id,
+            )
+        except Exception as exc:
+            _log.warning(
+                "Router call failed (request_id=%s): %s — using default LLM",
+                request_id,
+                exc,
+            )
 
     # ── Fetch KB document names for planner awareness ──────────────────────
     # Retrieve the list of ingested document names from Qdrant so the planner
@@ -364,7 +419,7 @@ async def run_with_streaming(
         else:
             messages = _build_plan_messages(goal, kb_docs=kb_docs)
 
-        resp = await orchestrator._llm.chat_completion(
+        resp = await routed_client.chat_completion(
             messages,
             request_id=request_id,
             temperature=0.0,
@@ -443,7 +498,12 @@ async def run_with_streaming(
     if not plan:
         run.status = OrchestratorStatus.COMPLETED
         _push(queue, SSE_SYNTHESIS_START, request_id, {})
-        run.final_output = await orchestrator._synthesise(goal, run)
+        run.final_output = await orchestrator._synthesise(
+            goal,
+            run,
+            llm_client=routed_client,
+            capability=capability_label,
+        )
         _push(
             queue,
             SSE_COMPLETED,
@@ -586,7 +646,12 @@ async def run_with_streaming(
     run.status = OrchestratorStatus.COMPLETED
     _push(queue, SSE_SYNTHESIS_START, request_id, {})
 
-    run.final_output = await orchestrator._synthesise(goal, run)
+    run.final_output = await orchestrator._synthesise(
+        goal,
+        run,
+        llm_client=routed_client,
+        capability=capability_label,
+    )
 
     sources = _extract_sources(run)
     artifacts = _extract_artifacts(run)

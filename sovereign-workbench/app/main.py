@@ -68,8 +68,9 @@ _vision_client: OllamaClient | None = None  # Phase D — VisionExtractTool
 _ingestor: Any | None = None   # app.rag.ingestor.Ingestor
 _vector_store: Any | None = None  # app.rag.store.VectorStore
 
-# Phase E: Orchestrator singleton
+# Phase E: Orchestrator and Router singletons
 _orchestrator: Any | None = None  # app.orchestrator.orchestrator.Orchestrator
+_router: Any | None = None        # app.router.router.Router
 
 # The model used by the /chat endpoint — resolved at startup by tier_resolver.
 _DEFAULT_MODEL_NAME = os.environ.get("DEFAULT_MODEL", "qwen25_14b_instruct")
@@ -84,7 +85,7 @@ _DEFAULT_VISION_MODEL_NAME = "qwen25vl_3b"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    global _audit_logger, _async_audit, _default_client, _embedding_client, _vision_client, _ingestor, _vector_store, _orchestrator
+    global _audit_logger, _async_audit, _default_client, _embedding_client, _vision_client, _ingestor, _vector_store, _orchestrator, _router
     resolved: dict = {}  # populated by tier resolver; safe default for scope
 
     # ── Audit logger ───────────────────────────────────────────────────
@@ -248,6 +249,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     try:
         from app.orchestrator.orchestrator import Orchestrator
+        from app.router.router import Router
+
+        _router = Router(
+            audit_logger=_audit_logger,
+            llm_client=_default_client,
+            default_model_name=actual_default,
+        )
+
         _orchestrator = Orchestrator(
             llm_client=_default_client,
             audit_logger=_audit_logger,
@@ -270,8 +279,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             startup_resolved=resolved,
             startup_gpu_info=_startup_gpu_info,
             vector_store=_vector_store,
+            router=_router,
         )
-        _log.info("Orchestrator initialised and Phase E router wired.")
+        _log.info("Orchestrator and Router initialised; Phase E router wired.")
     except Exception as exc:  # noqa: BLE001
         _log.warning("Orchestrator setup failed (%s) — /orchestrator endpoints unavailable", exc)
 

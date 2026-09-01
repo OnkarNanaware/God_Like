@@ -103,17 +103,14 @@ _SPREADSHEET_EXTENSIONS: frozenset[str] = frozenset(
 # Keyword patterns that signal a code/debugging task.
 # Each tuple is (pattern, confidence, capability, reason).
 _CODE_KEYWORD_PATTERNS: list[tuple[re.Pattern[str], float, Capability, str]] = [
-    (re.compile(r"\btraceback\b", re.IGNORECASE), 0.90, Capability.DEBUGGING, "contains 'traceback'"),
-    (re.compile(r"\bstack\s+trace\b", re.IGNORECASE), 0.90, Capability.DEBUGGING, "contains 'stack trace'"),
-    (re.compile(r"\berror:\s+", re.IGNORECASE), 0.80, Capability.DEBUGGING, "contains 'error:'"),
-    (re.compile(r"\bexception\b", re.IGNORECASE), 0.80, Capability.DEBUGGING, "contains 'exception'"),
-    (re.compile(r"\bdef\s+\w+\s*\(", re.IGNORECASE), 0.85, Capability.CODE_GENERATION, "contains function definition"),
-    (re.compile(r"\bclass\s+\w+[\s(:]", re.IGNORECASE), 0.85, Capability.CODE_GENERATION, "contains class definition"),
-    (re.compile(r"\bfunction\s+\w+\s*\(", re.IGNORECASE), 0.82, Capability.CODE_GENERATION, "contains JS/TS function"),
-    (re.compile(r"\bimport\s+\w+", re.IGNORECASE), 0.70, Capability.CODE_GENERATION, "contains import statement"),
-    (re.compile(r"\brefactor\b", re.IGNORECASE), 0.80, Capability.REFACTORING, "contains 'refactor'"),
-    (re.compile(r"\bcode\s+review\b", re.IGNORECASE), 0.80, Capability.CODE_REVIEW, "contains 'code review'"),
-    (re.compile(r"\bdebug\b", re.IGNORECASE), 0.78, Capability.DEBUGGING, "contains 'debug'"),
+    (re.compile(r"\b(traceback|stack\s*trace)\b", re.IGNORECASE), 0.95, Capability.DEBUGGING, "contains traceback/stacktrace"),
+    (re.compile(r"\b(typeerror|valueerror|syntaxerror|indexerror|keyerror|attributeerror|nameerror|zerodivisionerror|nullpointerexception|uncaught\s+exception)\b", re.IGNORECASE), 0.92, Capability.DEBUGGING, "contains standard exception name"),
+    (re.compile(r"\b(error:\s+|exception\b|debug\b|fix\s+(this|the|my|an?)\b)", re.IGNORECASE), 0.88, Capability.DEBUGGING, "contains debug/error/fix indicator"),
+    (re.compile(r"\b(write|create|generate|implement|give\s+me|show\s+me|build)\s+(me\s+)?(a\s+|an\s+|the\s+)?([a-z0-9_+-]+\s+)*(function|script|program|class|method|code|snippet|algorithm|api|app|service|handler)\b", re.IGNORECASE), 0.90, Capability.CODE_GENERATION, "code generation request (write a ... function/code)"),
+    (re.compile(r"\b(python|javascript|typescript|golang|java|rust|c\+\+|sql|bash|html|css|php|ruby|swift|kotlin)\b", re.IGNORECASE), 0.85, Capability.CODE_GENERATION, "mentions programming language"),
+    (re.compile(r"\b(code|coding|algorithm|regex|sql\s+query|def\s+\w+\s*\(|class\s+\w+[\s(:]|function\s+\w+\s*\(|import\s+\w+)\b", re.IGNORECASE), 0.85, Capability.CODE_GENERATION, "contains code structure / programming keyword"),
+    (re.compile(r"\b(refactor|optimize\s+code|clean\s+up\s+code)\b", re.IGNORECASE), 0.85, Capability.REFACTORING, "contains refactoring keyword"),
+    (re.compile(r"\b(code\s+review|review\s+(this|the|my)\s+code)\b", re.IGNORECASE), 0.85, Capability.CODE_REVIEW, "contains code review keyword"),
     (re.compile(r"```[\w]*\n", re.IGNORECASE), 0.85, Capability.CODE_GENERATION, "contains fenced code block"),
 ]
 

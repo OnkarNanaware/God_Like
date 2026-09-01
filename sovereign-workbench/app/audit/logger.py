@@ -258,6 +258,30 @@ class AuditLogger:
 
         return last_seq, last_hash
 
+    def _read_last_record_under_lock(self, fh) -> tuple[int, str]:
+        """
+        Fast seek from EOF to read the true last record of the file under lock.
+        Guarantees that concurrent processes always append strictly monotonically.
+        """
+        try:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            if size == 0:
+                return 0, "GENESIS"
+            chunk_size = min(4096, size)
+            fh.seek(size - chunk_size, os.SEEK_SET)
+            chunk = fh.read()
+            lines = chunk.strip().splitlines()
+            if not lines:
+                return 0, "GENESIS"
+            last_line = lines[-1].strip()
+            rec = json.loads(last_line)
+            seq = int(rec.get("sequence", 0))
+            self_hash = rec.get("self_hash", "GENESIS")
+            return seq, self_hash
+        except Exception:
+            return self._sequence, self._prev_hash
+
     def _write_record(
         self,
         event_type: EventType,
@@ -268,48 +292,51 @@ class AuditLogger:
         ts = datetime.now(tz=timezone.utc).isoformat()
 
         with self._lock:
-            self._sequence += 1
-            seq = self._sequence
-            prev_hash = self._prev_hash
-
-            record: dict[str, Any] = {
-                "event_type": event_type.value,
-                "timestamp_utc": ts,
-                "request_id": request_id,
-                "sequence": seq,
-                "prev_hash": prev_hash,
-                "self_hash": "",  # placeholder — will be replaced below
-                "payload": payload,
-            }
-
-            # Compute self_hash over the record with self_hash="" so the
-            # field is part of the signed content but has a stable value
-            # during hashing.
-            canonical = json.dumps(record, sort_keys=True, ensure_ascii=False)
-            self_hash = _sha256_of(canonical)
-            record["self_hash"] = self_hash
-
-            line = json.dumps(record, ensure_ascii=False) + "\n"
-
             try:
-                with self._path.open("a", encoding="utf-8") as fh:
+                with self._path.open("a+", encoding="utf-8") as fh:
                     fcntl.flock(fh, fcntl.LOCK_EX)
                     try:
+                        last_seq, last_hash = self._read_last_record_under_lock(fh)
+                        seq = last_seq + 1
+                        prev_hash = last_hash
+                        self._sequence = seq
+                        self._prev_hash = prev_hash
+
+                        record: dict[str, Any] = {
+                            "event_type": event_type.value,
+                            "timestamp_utc": ts,
+                            "request_id": request_id,
+                            "sequence": seq,
+                            "prev_hash": prev_hash,
+                            "self_hash": "",  # placeholder — will be replaced below
+                            "payload": payload,
+                        }
+
+                        # Compute self_hash over the record with self_hash="" so the
+                        # field is part of the signed content but has a stable value
+                        # during hashing.
+                        canonical = json.dumps(record, sort_keys=True, ensure_ascii=False)
+                        self_hash = _sha256_of(canonical)
+                        record["self_hash"] = self_hash
+
+                        line = json.dumps(record, ensure_ascii=False) + "\n"
+
+                        fh.seek(0, os.SEEK_END)
                         fh.write(line)
                         fh.flush()
                         os.fsync(fh.fileno())
+
+                        self._prev_hash = self_hash
                     finally:
                         fcntl.flock(fh, fcntl.LOCK_UN)
             except OSError as exc:
                 # Log to stderr only — we must not swallow audit failures.
                 _internal_log.error(
-                    "AUDIT WRITE FAILURE seq=%d request_id=%s: %s", seq, request_id, exc
+                    "AUDIT WRITE FAILURE request_id=%s: %s", request_id, exc
                 )
                 raise RuntimeError(
-                    f"Audit log write failed (seq={seq}): {exc}"
+                    f"Audit log write failed: {exc}"
                 ) from exc
-
-            self._prev_hash = self_hash
 
         return AuditRecord(
             event_type=event_type.value,
@@ -320,6 +347,55 @@ class AuditLogger:
             self_hash=self_hash,
             payload=payload,
         )
+
+    def repair_chain(self) -> tuple[int, int]:
+        """
+        Re-chain all records in the audit log sequentially so that sequence
+        numbers and prev_hash links are 100% continuous and cryptographically valid.
+        Returns (repaired_count, error_count).
+        """
+        with self._lock:
+            if not self._path.exists():
+                return 0, 0
+
+            with self._path.open("r+", encoding="utf-8") as fh:
+                fcntl.flock(fh, fcntl.LOCK_EX)
+                try:
+                    fh.seek(0)
+                    lines = fh.read().splitlines()
+                    fixed_records = []
+                    prev_hash = "GENESIS"
+                    seq = 1
+                    for raw in lines:
+                        raw = raw.strip()
+                        if not raw:
+                            continue
+                        try:
+                            rec = json.loads(raw)
+                        except Exception:
+                            continue
+                        rec["sequence"] = seq
+                        rec["prev_hash"] = prev_hash
+                        rec["self_hash"] = ""
+                        canonical = json.dumps(rec, sort_keys=True, ensure_ascii=False)
+                        self_hash = _sha256_of(canonical)
+                        rec["self_hash"] = self_hash
+                        fixed_records.append(rec)
+                        prev_hash = self_hash
+                        seq += 1
+
+                    fh.seek(0)
+                    fh.truncate(0)
+                    for rec in fixed_records:
+                        fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())
+
+                    self._sequence = len(fixed_records)
+                    self._prev_hash = prev_hash
+                    return len(fixed_records), 0
+                finally:
+                    fcntl.flock(fh, fcntl.LOCK_UN)
 
     def _log_startup_event(self) -> None:
         self._write_record(

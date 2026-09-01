@@ -92,10 +92,8 @@ _force_tier_override: Optional[str] = None
 
 _audit_logger = None          # AuditLogger singleton
 _async_audit = None           # AsyncAuditAdapter wrapping _audit_logger
-_orchestrator = None          # Orchestrator instance
-_startup_resolved: dict = {}  # {modality: model_name} from startup tier resolver
-_startup_gpu_info: dict = {}  # GpuInfo from startup
 _vector_store = None          # VectorStore singleton (for KB-awareness in planning)
+_router = None                # Router singleton (for dynamic model selection)
 
 
 def setup_orchestrator_router(
@@ -105,15 +103,17 @@ def setup_orchestrator_router(
     startup_resolved: dict,
     startup_gpu_info: dict,
     vector_store=None,
+    router=None,
 ) -> None:
     """Called once from main.py's lifespan to wire up singletons."""
-    global _audit_logger, _async_audit, _orchestrator, _startup_resolved, _startup_gpu_info, _vector_store
+    global _audit_logger, _async_audit, _orchestrator, _startup_resolved, _startup_gpu_info, _vector_store, _router
     _audit_logger = audit_logger
     _async_audit = async_audit
     _orchestrator = orchestrator
     _startup_resolved = startup_resolved
     _startup_gpu_info = startup_gpu_info
     _vector_store = vector_store
+    _router = router
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +347,7 @@ async def orchestrator_run(
                 attached_files=saved_paths,
                 async_audit=_async_audit,
                 vector_store=_vector_store,
+                router=_router,
             )
         except Exception as exc:
             _log.exception(

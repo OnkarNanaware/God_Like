@@ -120,22 +120,19 @@ Phrases that are NOT generation requests — answer in chat only, NO generation 
   "what are the recommendations", "analyse this spreadsheet", "what does X mean",
   or any question whose answer fits naturally in a text response
 
-AMBIGUITY RULE: If the goal could be interpreted either way, default to a
-chat-only text answer. Do NOT include a generation tool step unless the
-request is unambiguously asking for a file. An unwanted file delivered to
-the user is a worse outcome than the user asking again.
+GENERAL KNOWLEDGE RULE:
+Return an EMPTY array [] ONLY for trivial greetings (e.g. "hello"), basic math (e.g. "what is 2+2"), or pure general chat that has no relation to any system, architecture, report, or technical topic.
 
-GENERAL KNOWLEDGE RULE: If the goal is a pure conversational or mathematical
-question with no connection to any uploaded file or internal document corpus —
-e.g. "What is 2+2?", "Write me a haiku", "Explain what recursion means" —
-return an EMPTY array []. Do NOT call rag_search or any other tool.
-This rule applies ONLY when the question clearly requires no document lookup.
+CODE TASK RULE:
+If the goal is explicitly a pure programming, scripting, or debugging task — such as:
+  "write a function to reverse a string", "debug this traceback", "implement binary search in Python",
+  "write a script to parse CSV"
+— use the 'code_sandbox' tool. Do NOT call rag_search for standalone generic programming requests.
 
-RAG SEARCH RULE: If the goal mentions, asks about, or refers to internal
-documents, standards, reports, SOPs, policies, audits, inspections, or any
-organisation-specific knowledge that could be in the knowledge base, you MUST
-call rag_search. When in doubt, call rag_search — a search that returns no
-results is better than skipping the search entirely.
+RAG SEARCH RULE:
+If the goal asks about ANY project, system architecture, internal knowledge, concept, design (e.g. "explain SignBridge architecture"), report, standard, policy, SOP, audit, compliance, inspection, or organisation topic:
+You MUST call 'rag_search' with tool_args: {{"query": "<concise search query>"}}.
+Always search the internal knowledge base for domain, project, or document questions to retrieve grounded context.
 
 CRITICAL RULES — violating any of these will cause the agent to fail:
 - Output only the JSON array. No prose, no markdown fences, no code blocks.
@@ -195,6 +192,10 @@ ALWAYS start your response with:
 Then provide the answer on the next line.
 """.strip()
 
+_CODE_ANSWER_SYSTEM_PROMPT = """\
+You are an expert software engineer and technical assistant. The user has asked a programming or code-related question. Provide clean, robust, efficient, and well-structured code with concise explanations. Answer directly and authoritatively.
+""".strip()
+
 
 def _tools_json_str() -> str:
     return json.dumps(list_tools(), indent=2)
@@ -222,12 +223,12 @@ def _build_plan_messages(
     if kb_docs:
         doc_list = "\n".join(f"  - {d}" for d in kb_docs)
         user_content += (
-            "\n\nKB AWARENESS — the following documents are currently indexed "
-            "in the internal knowledge base:\n"
+            "\n\nKB AWARENESS — indexed documents in the knowledge base:\n"
             f"{doc_list}\n"
-            "If the goal asks about any of these documents or their content, "
-            "you MUST call rag_search (RAG SEARCH RULE applies). "
-            "Do NOT return an empty array []."
+            "If the goal asks about any topic, concept, system, architecture, or content related to these documents or internal domain knowledge, you MUST call rag_search (RAG SEARCH RULE applies). "
+            "Do NOT return an empty array [].\n"
+            "HOWEVER: if the goal is purely a generic programming or coding task (e.g. 'write a python function to reverse a string'), "
+            "use code_sandbox instead of rag_search."
         )
     return [
         {"role": "system", "content": _PLANNING_SYSTEM_PROMPT.format(tools_json=_tools_json_str())},
@@ -347,8 +348,19 @@ def _parse_plan(raw: str) -> list[PlannedStep]:
             raise ValueError(f"Plan step tool_args/arguments is not a dict: {item!r}")
 
         # Filter out invented tool names early — log a warning and skip.
+        # Known tools include static tools and dynamically registered tools.
+        _KNOWN_TOOL_NAMES = {
+            "file_read",
+            "generate_docx",
+            "generate_pptx",
+            "generate_xlsx",
+            "code_sandbox",
+            "rag_search",
+            "vision_extract",
+            "analyze_spreadsheet",
+        }
         from app.tools.registry import TOOL_REGISTRY as _TOOL_REGISTRY
-        if tool_name not in _TOOL_REGISTRY:
+        if tool_name not in _TOOL_REGISTRY and tool_name not in _KNOWN_TOOL_NAMES:
             _log.warning(
                 "Plan references unknown tool '%s' — removing from plan. "
                 "Available: %s",
@@ -577,10 +589,12 @@ class Orchestrator:
         goal: str,
         run: OrchestratorRun,
         kb_docs: Optional[list[str]] = None,
+        llm_client: Optional[LLMOrchestratorProtocol] = None,
     ) -> list[PlannedStep]:
         """Ask the LLM to decompose ``goal`` into a list of tool steps."""
+        client = llm_client or self._llm
         messages = _build_plan_messages(goal, kb_docs=kb_docs)
-        resp = await self._llm.chat_completion(
+        resp = await client.chat_completion(
             messages,
             request_id=run.request_id,
             temperature=0.0,
@@ -753,37 +767,60 @@ class Orchestrator:
             )
             return True, f"verification skipped ({exc})"
 
-    async def _synthesise(self, goal: str, run: OrchestratorRun) -> str:
+    async def _synthesise(
+        self,
+        goal: str,
+        run: OrchestratorRun,
+        llm_client: Optional[LLMOrchestratorProtocol] = None,
+        capability: Optional[str] = None,
+    ) -> str:
         """
         Produce a final answer from accumulated step outputs.
 
-        If no tool outputs were collected (empty plan / direct-answer path),
-        the LLM is asked to answer directly from its own knowledge, and the
-        response is labelled as "⚠️ General knowledge — not from an internal document."
+        If no tool outputs were collected (empty plan / direct-answer path):
+        - For code capabilities (code_generation, debugging, etc.): uses the Coder LLM
+          with _CODE_ANSWER_SYSTEM_PROMPT.
+        - For general knowledge questions: uses _DIRECT_ANSWER_SYSTEM_PROMPT and
+          labels with "⚠️ General knowledge — not from an internal document."
 
         If tool outputs exist, the LLM synthesises from those outputs.  If all
         the outputs came from an empty RAG result, the synthesis prompt instructs
         the model to fall back to general knowledge and label accordingly.
         """
+        client = llm_client or self._llm
+        is_code_task = capability in {
+            "code_generation",
+            "code_review",
+            "debugging",
+            "refactoring",
+            "complex_code",
+        }
+
         # ── Direct-answer path (empty plan: no tools were called) ───────────
         if not run.context_snippets:
-            messages = [
-                {"role": "system", "content": _DIRECT_ANSWER_SYSTEM_PROMPT},
-                {"role": "user", "content": goal},
-            ]
+            if is_code_task:
+                messages = [
+                    {"role": "system", "content": _CODE_ANSWER_SYSTEM_PROMPT},
+                    {"role": "user", "content": goal},
+                ]
+            else:
+                messages = [
+                    {"role": "system", "content": _DIRECT_ANSWER_SYSTEM_PROMPT},
+                    {"role": "user", "content": goal},
+                ]
             try:
-                resp = await self._llm.chat_completion(
+                resp = await client.chat_completion(
                     messages,
                     request_id=run.request_id,
-                    temperature=0.3,
-                    max_tokens=1024,
+                    temperature=0.2 if is_code_task else 0.3,
+                    max_tokens=2048 if is_code_task else 1024,
                 )
                 return resp.content
             except Exception as exc:
                 _log.warning("Direct-answer synthesis failed (request_id=%s): %s", run.request_id, exc)
+                prefix = "" if is_code_task else "⚠️ General knowledge — not from an internal document.\n\n"
                 return (
-                    "⚠️ General knowledge — not from an internal document.\n\n"
-                    f"(Synthesis step failed: {exc})"
+                    f"{prefix}(Synthesis step failed: {exc})"
                 )
 
         # ── Tool-grounded synthesis path ─────────────────────────────────
@@ -807,8 +844,9 @@ class Orchestrator:
 
         if all_rag_empty:
             # All RAG calls returned nothing: answer from general knowledge, labelled.
+            system_prompt = _CODE_ANSWER_SYSTEM_PROMPT if is_code_task else _DIRECT_ANSWER_SYSTEM_PROMPT
             messages = [
-                {"role": "system", "content": _DIRECT_ANSWER_SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {
                     "role": "user",
                     "content": (
@@ -822,10 +860,10 @@ class Orchestrator:
             messages = _build_synthesis_messages(goal, run.context_snippets)
 
         try:
-            resp = await self._llm.chat_completion(
+            resp = await client.chat_completion(
                 messages,
                 request_id=run.request_id,
-                temperature=0.3,
+                temperature=0.2 if is_code_task else 0.3,
                 max_tokens=2048,
             )
             return resp.content
