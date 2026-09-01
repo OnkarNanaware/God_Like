@@ -125,13 +125,17 @@ chat-only text answer. Do NOT include a generation tool step unless the
 request is unambiguously asking for a file. An unwanted file delivered to
 the user is a worse outcome than the user asking again.
 
-GENERAL KNOWLEDGE RULE: If the goal is a conceptual or definitional question
-that you can answer from general knowledge — e.g. "What is OISD?", "What does
-API stand for?", "Explain what a heat exchanger does" — return an EMPTY array
-[]. Do NOT call rag_search, file_read, or any other tool. An empty plan causes
-the system to answer directly from the model's own knowledge and is the CORRECT
-behaviour for general-knowledge questions. RAG is for retrieving specific
-documents from the organisation's internal corpus, not for answering concepts.
+GENERAL KNOWLEDGE RULE: If the goal is a pure conversational or mathematical
+question with no connection to any uploaded file or internal document corpus —
+e.g. "What is 2+2?", "Write me a haiku", "Explain what recursion means" —
+return an EMPTY array []. Do NOT call rag_search or any other tool.
+This rule applies ONLY when the question clearly requires no document lookup.
+
+RAG SEARCH RULE: If the goal mentions, asks about, or refers to internal
+documents, standards, reports, SOPs, policies, audits, inspections, or any
+organisation-specific knowledge that could be in the knowledge base, you MUST
+call rag_search. When in doubt, call rag_search — a search that returns no
+results is better than skipping the search entirely.
 
 CRITICAL RULES — violating any of these will cause the agent to fail:
 - Output only the JSON array. No prose, no markdown fences, no code blocks.
@@ -196,10 +200,38 @@ def _tools_json_str() -> str:
     return json.dumps(list_tools(), indent=2)
 
 
-def _build_plan_messages(goal: str) -> list[dict[str, str]]:
+def _build_plan_messages(
+    goal: str,
+    kb_docs: Optional[list[str]] = None,
+) -> list[dict[str, str]]:
+    """
+    Build planning messages for the LLM.
+
+    Parameters
+    ----------
+    goal:
+        The user's natural-language goal.
+    kb_docs:
+        Optional list of document names currently in the knowledge base
+        (e.g. ["amcat.pdf", "oisd_guide.pdf"]).  When provided, a
+        KB AWARENESS block is injected into the user message so the
+        planner knows to route questions about those documents through
+        ``rag_search`` instead of the general-knowledge path.
+    """
+    user_content = f"Goal: {goal}"
+    if kb_docs:
+        doc_list = "\n".join(f"  - {d}" for d in kb_docs)
+        user_content += (
+            "\n\nKB AWARENESS — the following documents are currently indexed "
+            "in the internal knowledge base:\n"
+            f"{doc_list}\n"
+            "If the goal asks about any of these documents or their content, "
+            "you MUST call rag_search (RAG SEARCH RULE applies). "
+            "Do NOT return an empty array []."
+        )
     return [
         {"role": "system", "content": _PLANNING_SYSTEM_PROMPT.format(tools_json=_tools_json_str())},
-        {"role": "user", "content": f"Goal: {goal}"},
+        {"role": "user", "content": user_content},
     ]
 
 
@@ -398,8 +430,9 @@ class Orchestrator:
 
         # ── PLANNING ─────────────────────────────────────────────────────
         run.status = OrchestratorStatus.PLANNING
+        kb_docs: Optional[list[str]] = None
         try:
-            plan = await self._plan(goal, run)
+            plan = await self._plan(goal, run, kb_docs=kb_docs)
         except Exception as exc:
             run.status = OrchestratorStatus.FAILED
             run.failure_summary = f"Planning failed: {exc}"
@@ -424,7 +457,7 @@ class Orchestrator:
             # Empty plan — model decided no tools are needed. Synthesise directly.
             run.status = OrchestratorStatus.COMPLETED
             run.final_output = await self._synthesise(goal, run)
-            self._log(EventType.AGENT_ACTION, run, "completed_no_tools", {})
+            self._log(EventType.AGENT_ACTION, run, "completed_no_tools", {"kb_docs": kb_docs or []})
             return run
 
         # ── ACT / OBSERVE / RETRY loop ────────────────────────────────────
@@ -538,9 +571,14 @@ class Orchestrator:
     # Internal phases
     # ------------------------------------------------------------------
 
-    async def _plan(self, goal: str, run: OrchestratorRun) -> list[PlannedStep]:
+    async def _plan(
+        self,
+        goal: str,
+        run: OrchestratorRun,
+        kb_docs: Optional[list[str]] = None,
+    ) -> list[PlannedStep]:
         """Ask the LLM to decompose ``goal`` into a list of tool steps."""
-        messages = _build_plan_messages(goal)
+        messages = _build_plan_messages(goal, kb_docs=kb_docs)
         resp = await self._llm.chat_completion(
             messages,
             request_id=run.request_id,
@@ -748,15 +786,22 @@ class Orchestrator:
                 )
 
         # ── Tool-grounded synthesis path ─────────────────────────────────
-        # Detect whether all context came from empty RAG results, so the
+        # Detect whether ALL context came from empty RAG results so the
         # synthesis prompt can instruct the model to fall back to general knowledge.
-        all_rag_empty = all(
-            "0 results" in snippet or "no results" in snippet.lower()
-            or "returned 0" in snippet.lower()
-            for snippet in run.context_snippets
-            if "rag_search" in snippet or "[Step" in snippet
-        ) and any(
-            "rag_search" in snippet for snippet in run.context_snippets
+        #
+        # FIX (Bug 3): Match only the exact sentinel string that RagSearchTool
+        # returns on a zero-hit search.  The previous broad match
+        # ("no results" in s.lower()) could accidentally match document
+        # content that happens to contain those words, causing real RAG
+        # results to be silently discarded.
+        _RAG_EMPTY_SENTINEL = "No relevant documents found in the knowledge base."
+        rag_snippets = [
+            s for s in run.context_snippets
+            if "rag_search" in s
+        ]
+        all_rag_empty = bool(rag_snippets) and all(
+            _RAG_EMPTY_SENTINEL in s
+            for s in rag_snippets
         )
 
         if all_rag_empty:

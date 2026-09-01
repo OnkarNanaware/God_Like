@@ -197,7 +197,11 @@ def _classify_attached_files(attached_files: list[str]) -> dict:
     return result
 
 
-def _build_augmented_plan_messages(goal: str, attached_files: list[str]) -> list[dict]:
+def _build_augmented_plan_messages(
+    goal: str,
+    attached_files: list[str],
+    kb_docs: Optional[list[str]] = None,
+) -> list[dict]:
     """
     Build planning messages with an explicit attached-files block
     so the planner sees them as structured context, not text to parse.
@@ -207,6 +211,11 @@ def _build_augmented_plan_messages(goal: str, attached_files: list[str]) -> list
     rule — this is the fix for the priority-ordering regression where the planner
     was firing the empty-plan general-knowledge path instead of calling
     analyze_spreadsheet.
+
+    kb_docs:
+        Optional list of document names currently indexed in the knowledge base.
+        Injected as a KB AWARENESS block so the planner knows when rag_search
+        is mandatory.
     """
     classified = _classify_attached_files(attached_files)
     spreadsheets = classified["spreadsheets"]
@@ -236,8 +245,41 @@ def _build_augmented_plan_messages(goal: str, attached_files: list[str]) -> list
             f"{spreadsheet_block}"
         )
 
-    messages = _build_plan_messages(augmented_goal)
+    messages = _build_plan_messages(augmented_goal, kb_docs=kb_docs)
     return messages
+
+
+def _fetch_kb_doc_names(
+    vector_store: Any,
+    collection: str = "sovereign_knowledge_base",
+    limit: int = 500,
+) -> list[str]:
+    """
+    Fetch the distinct document names currently indexed in Qdrant.
+
+    Returns a deduplicated list of ``doc_name`` values (PDF basenames, etc.)
+    from the collection payload.  Returns an empty list on any error so a
+    Qdrant hiccup never blocks the orchestrator.
+    """
+    try:
+        points, _ = vector_store._client.scroll(
+            collection_name=collection,
+            limit=limit,
+            with_payload=True,
+            with_vectors=False,
+        )
+        seen: set[str] = set()
+        names: list[str] = []
+        for p in points:
+            payload = p.payload or {}
+            doc_name = payload.get("doc_name") or ""
+            if doc_name and doc_name not in seen:
+                seen.add(doc_name)
+                names.append(doc_name)
+        return names
+    except Exception as exc:
+        _log.warning("Could not fetch KB doc names from Qdrant: %s", exc)
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +295,7 @@ async def run_with_streaming(
     request_id: Optional[str] = None,
     attached_files: Optional[list[str]] = None,
     async_audit: Optional[AsyncAuditAdapter] = None,
+    vector_store: Optional[Any] = None,
 ) -> OrchestratorRun:
     """
     Run the orchestrator and push SSE events to *queue* at each transition.
@@ -276,6 +319,12 @@ async def run_with_streaming(
         inside this coroutine.  If ``None``, audit writes are skipped here
         (the orchestrator's own sync writes still happen via its internal
         ``_log()`` calls).
+    vector_store:
+        Optional :class:`~app.rag.store.VectorStore` instance.  When provided,
+        the list of currently-indexed document names is fetched from Qdrant
+        and injected into the planning prompt as a KB AWARENESS block so the
+        planner knows to call ``rag_search`` for questions about those documents
+        instead of falling back to general knowledge.
 
     Returns
     -------
@@ -292,13 +341,30 @@ async def run_with_streaming(
         payload.update(extra)
         await async_audit.log_event(event_type, request_id=request_id, payload=payload)
 
+    # ── Fetch KB document names for planner awareness ──────────────────────
+    # Retrieve the list of ingested document names from Qdrant so the planner
+    # prompt includes a KB AWARENESS block.  This prevents the planner from
+    # choosing the GENERAL KNOWLEDGE path for questions about ingested docs.
+    kb_docs: list[str] = []
+    if vector_store is not None:
+        kb_docs = await asyncio.get_event_loop().run_in_executor(
+            None, _fetch_kb_doc_names, vector_store
+        )
+        if kb_docs:
+            _log.info(
+                "KB awareness: %d document(s) injected into planning prompt (request_id=%s): %s",
+                len(kb_docs),
+                request_id,
+                kb_docs[:10],
+            )
+
     # ── PLANNING ──────────────────────────────────────────────────────────
     run.status = OrchestratorStatus.PLANNING
     try:
         if attached_files:
-            messages = _build_augmented_plan_messages(goal, attached_files)
+            messages = _build_augmented_plan_messages(goal, attached_files, kb_docs=kb_docs)
         else:
-            messages = _build_plan_messages(goal)
+            messages = _build_plan_messages(goal, kb_docs=kb_docs)
 
         resp = await orchestrator._llm.chat_completion(
             messages,
