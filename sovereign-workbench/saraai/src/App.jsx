@@ -176,6 +176,7 @@ export default function App() {
       isStreaming: true,
       streamingSteps: [],
       currentTool: null,
+      artifacts: [],   // populated immediately when artifact_created fires
     }
 
     const updatedConv = {
@@ -264,6 +265,33 @@ export default function App() {
             })
           }
 
+          if (type === 'artifact_created') {
+            // Append the new artifact immediately — before synthesis completes.
+            // payload is Artifact.to_dict() (no physical_path).
+            setConversations(prev =>
+              prev.map(c => {
+                if (c.id !== updatedConv.id) return c
+                return {
+                  ...c,
+                  messages: c.messages.map(m => {
+                    if (m.id !== streamingMsgId) return m
+                    const existing = m.artifacts || []
+                    // Deduplicate by artifact_id
+                    if (existing.some(a => a.artifact_id === payload.artifact_id)) return m
+                    return { ...m, artifacts: [...existing, payload] }
+                  }),
+                }
+              })
+            )
+          }
+
+          if (type === 'artifact_failed') {
+            // Non-fatal: log the warning but don't fail the whole message.
+            // The step_done(success=false) that precedes this already handles
+            // the step trace UI.
+            console.warn('Artifact registration failed:', payload)
+          }
+
           if (type === 'completed') {
             // Build a clean trace object for AgentActivity
             const trace = {
@@ -285,15 +313,41 @@ export default function App() {
               sources: payload.sources || [],
             }
 
-            updateMessage(updatedConv.id, streamingMsgId, {
-              isStreaming: false,
-              text: payload.final_output || '(No output)',
-              sources: payload.sources || [],
-              outputFiles: payload.output_files || [],
-              trace,
-              evidence,
-              requestId,
-            })
+            // payload.artifacts is the new canonical list (Artifact.to_dict() objects).
+            // We merge with any artifacts already appended via artifact_created events
+            // to avoid duplicates (artifact_created fires mid-run; artifacts in completed
+            // is the authoritative final list).
+            const payloadArtifacts = payload.artifacts || []
+
+            setConversations(prev =>
+              prev.map(c => {
+                if (c.id !== updatedConv.id) return c
+                return {
+                  ...c,
+                  messages: c.messages.map(m => {
+                    if (m.id !== streamingMsgId) return m
+                    // Merge: start from existing (mid-run) artifacts, add any new ones
+                    // from the completed payload that weren't already added.
+                    const existing = m.artifacts || []
+                    const existingIds = new Set(existing.map(a => a.artifact_id))
+                    const merged = [
+                      ...existing,
+                      ...payloadArtifacts.filter(a => !existingIds.has(a.artifact_id)),
+                    ]
+                    return {
+                      ...m,
+                      isStreaming: false,
+                      text: payload.final_output || '(No output)',
+                      sources: payload.sources || [],
+                      artifacts: merged,
+                      trace,
+                      evidence,
+                      requestId,
+                    }
+                  }),
+                }
+              })
+            )
 
             setIsGenerating(false)
           }

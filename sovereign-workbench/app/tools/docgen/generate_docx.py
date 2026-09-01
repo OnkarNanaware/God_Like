@@ -21,8 +21,9 @@ request_id      : str | None
 
 Output
 ------
-ToolResult.output   : absolute path to the generated file (str)
-ToolResult.metadata : {file_path, size_bytes, section_count, table_rows, document_type}
+ToolResult.output   : sanitized display filename (str, e.g. "report.docx")
+ToolResult.metadata : {"artifact": <Artifact.to_dict()>} on success
+                      {"artifact_error": {filename, error}} if registration fails
 
 Audit
 -----
@@ -41,12 +42,14 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from app.artifacts.manager import ArtifactError, get_artifact_manager
 from app.audit.logger import AuditLogger, EventType
 from app.tools.base import BaseTool, ToolResult
 
 _log = logging.getLogger("sovereign.tools.docgen.generate_docx")
 
-# Output directory — relative to the project root (two levels up from this file)
+# Output directory — relative to the project root (two levels up from this file).
+# The generator writes here first; ArtifactManager renames to a UUID-prefixed path.
 _OUTPUT_DIR = Path(__file__).resolve().parents[3] / "outputs" / "generated"
 
 _FINDINGS_HEADERS = ["ID", "Finding", "Severity", "Status"]
@@ -176,10 +179,33 @@ class GenerateDocxTool(BaseTool):
             )
 
         elapsed_ms = (time.monotonic() - t0) * 1000
-        size_bytes = output_path.stat().st_size
+
+        # ── Register artifact (atomic rename → UUID-named file) ────────────
+        try:
+            manager = get_artifact_manager()
+            artifact = manager.register_artifact(
+                source_path=output_path,
+                filename=output_filename,
+                mime_type="application/vnd.openxmlformats-officedocument"
+                          ".wordprocessingml.document",
+                artifact_type="docx",
+                request_id=request_id,
+            )
+        except ArtifactError as exc:
+            _log.error(
+                "Artifact registration failed for %s: %s", output_filename, exc
+            )
+            # Clean up any orphaned file if rename didn't happen
+            output_path.unlink(missing_ok=True)
+            return ToolResult(
+                success=False,
+                output=None,
+                error=f"Artifact registration failed: {exc}",
+                metadata={"artifact_error": {"filename": output_filename, "error": str(exc)}},
+            )
 
         self._log_generation(
-            output_path=str(output_path),
+            output_path=str(artifact.physical_path),
             document_type=document_type,
             section_count=section_count,
             table_rows=table_rows,
@@ -189,10 +215,9 @@ class GenerateDocxTool(BaseTool):
 
         return ToolResult(
             success=True,
-            output=str(output_path),
+            output=artifact.filename,
             metadata={
-                "file_path": str(output_path),
-                "size_bytes": size_bytes,
+                "artifact": artifact.to_dict(),
                 "section_count": section_count,
                 "table_rows": table_rows,
                 "document_type": document_type,

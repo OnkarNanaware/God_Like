@@ -484,6 +484,7 @@ class Orchestrator:
                     output=result.output,
                     error=result.error,
                     attempt=attempt,
+                    metadata=result.metadata or {},
                 )
                 run.outcomes.append(outcome)
 

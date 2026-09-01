@@ -275,6 +275,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as exc:  # noqa: BLE001
         _log.warning("Orchestrator setup failed (%s) — /orchestrator endpoints unavailable", exc)
 
+    # ── ArtifactManager (Phase F — docgen artifact registration) ───────
+    # Pre-warm the singleton so outputs/generated/ is created before any
+    # docgen tool executes.  This is a no-op if called again later.
+    try:
+        from app.artifacts.manager import get_artifact_manager
+        _artifact_manager = get_artifact_manager()
+        _log.info(
+            "ArtifactManager ready — storage_dir=%s",
+            _artifact_manager._storage_dir,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("ArtifactManager init failed (%s) — artifact downloads unavailable", exc)
+
+
     yield  # ← application runs here
 
     # Shutdown

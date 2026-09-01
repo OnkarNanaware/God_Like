@@ -174,10 +174,23 @@ export async function fetchAuditRecent(requestId = null, n = 50) {
 // ---------------------------------------------------------------------------
 
 /**
- * Build a URL for downloading a generated output file.
+ * Build a download URL for a registered artifact using its UUID.
+ *
+ * @param {string} artifactId - The 32-char hex artifact_id from the SSE event.
+ * Returns the full download URL string.
+ */
+export function artifactDownloadUrl(artifactId) {
+  return `${BACKEND_URL}/outputs/${encodeURIComponent(artifactId)}`
+}
+
+/**
+ * @deprecated Use artifactDownloadUrl(artifact_id) instead.
+ *
+ * Build a URL for downloading a generated output file by basename.
+ * Kept as a compatibility shim — the backend now requires a UUID artifact_id,
+ * so this function will return URLs that result in 400 for any new artifact.
  *
  * @param {string} filename - Basename only (no path separators).
- * Returns the full download URL string.
  */
 export function outputFileUrl(filename) {
   // Strip any path components the server would reject anyway.
