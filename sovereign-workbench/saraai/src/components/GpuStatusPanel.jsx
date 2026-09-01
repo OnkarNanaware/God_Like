@@ -160,12 +160,11 @@ export default function GpuStatusPanel({ onReady }) {
           left: 0,
           zIndex: 200,
           minWidth: 340,
-          backgroundColor: '#0d101a',
-          background: '#0d101a',
-          border: '1px solid rgba(255, 255, 255, 0.12)',
+          background: 'var(--bg-panel)',
+          border: '1px solid var(--border-subtle)',
           borderRadius: 10,
           padding: '12px 14px',
-          boxShadow: '0 12px 36px rgba(0,0,0,0.8)',
+          boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
         }}>
           {/* GPU info */}
           <div style={{ marginBottom: 10, fontSize: 12 }}>

@@ -43,7 +43,7 @@ export default function EmptyState({ onSelectSuggestion }) {
 
   return (
     <div className="home-empty-container">
-      <h1 className="home-hero-title">SARA</h1>
+      <h1 className="home-hero-title">SARA-AI</h1>
       <div className="home-hero-subtitle">How can I help you today?</div>
       <div className="home-hero-desc">Ask, create, analyze, or research.</div>
 

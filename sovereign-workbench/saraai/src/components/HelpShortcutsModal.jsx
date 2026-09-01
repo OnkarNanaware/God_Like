@@ -17,12 +17,12 @@ export default function HelpShortcutsModal({ isOpen, defaultTab = 'shortcuts', o
 
   const faqs = [
     {
-      q: 'What is SARA?',
-      a: 'SARA is an air-gapped sovereign AI assistant equipped with local vector search (Qdrant), autonomous multi-step agent routers, and cryptographic audit trail verification.'
+      q: 'What is Sa-Ra AI?',
+      a: 'Sa-Ra AI is an air-gapped sovereign AI assistant equipped with local vector search (Qdrant), autonomous multi-step agent routers, and cryptographic audit trail verification.'
     },
     {
       q: 'How does Local RAG search work?',
-      a: 'When you ask questions referencing SOPs or MRPL reports, SARA queries the local vector index, retrieves the most relevant passage chunks, and cites exact sections and page numbers.'
+      a: 'When you ask questions referencing SOPs or MRPL reports, Sa-Ra AI queries the local vector index, retrieves the most relevant passage chunks, and cites exact sections and page numbers.'
     },
     {
       q: 'What is the Cryptographic Chain & Audit Trail?',
