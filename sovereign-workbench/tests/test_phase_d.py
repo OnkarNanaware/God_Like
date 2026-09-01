@@ -506,6 +506,9 @@ class TestOrchestratorIntegration:
         synthesis = "Generated the document successfully."
 
         orch = self._make_orch(plan, synthesis, tmp_path)
+        # _FakeOllamaClient now needs: plan → VERIFIED (sandbox verify call) → synthesis
+        orch._llm._responses = [plan, "VERIFIED", synthesis]
+        orch._llm._idx = 0
         run = _run(orch.run("Generate a test document", request_id="orch-docx-001"))
 
         assert run.status == OrchestratorStatus.COMPLETED, (
@@ -565,8 +568,11 @@ class TestOrchestratorIntegration:
         async def _fake_run(self_inner, container_name, host_script_path):
             return 0, "hello\n", "", False
 
+        # LLM call sequence: plan → VERIFIED (new verify call) → synthesis
         with patch.object(CodeSandboxTool, "_run_container", _fake_run):
             orch = self._make_orch(plan, synthesis, tmp_path)
+            orch._llm._responses = [plan, "VERIFIED", synthesis]
+            orch._llm._idx = 0
             run = _run(orch.run("Run hello world", request_id="orch-sandbox-001"))
 
         assert run.status == OrchestratorStatus.COMPLETED
@@ -637,7 +643,7 @@ class TestCodeSandboxDocker:
             request_id="sandbox-016",
         ))
 
-        assert result.success is True  # tool ran; orchestrator reads exit_code
+        assert result.success is False  # exit_code=1 now correctly propagates as failure
         assert result.output["exit_code"] == 1
         assert "ValueError" in result.output["stderr"]
         assert result.output["timed_out"] is False
