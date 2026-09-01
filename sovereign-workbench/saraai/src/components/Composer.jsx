@@ -133,13 +133,13 @@ export default function Composer({ onSend, onOpenHelp, disabled = false }) {
 
         <div className="composer-bottom-bar">
           <div className="composer-left-tools">
-            <label className="composer-tool-btn" title="Attach File (image or PDF)"
+            <label className="composer-tool-btn" title="Attach File (image, PDF, or spreadsheet)"
               style={{ cursor: disabled ? 'not-allowed' : 'pointer' }}>
               <PaperclipIcon size={18} />
               <input
                 type="file"
                 multiple
-                accept="image/*,.pdf"
+                accept="image/*,.pdf,.xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv"
                 style={{ display: 'none' }}
                 onChange={handleFileChange}
                 disabled={disabled}

@@ -174,12 +174,44 @@ def _extract_output_files(run: OrchestratorRun) -> list[str]:
     return files
 
 
+# Spreadsheet extensions that should always trigger analyze_spreadsheet
+_SPREADSHEET_EXTS = frozenset({".xlsx", ".xls", ".csv"})
+
+
+def _classify_attached_files(attached_files: list[str]) -> dict:
+    """
+    Classify attached files by category.
+
+    Returns a dict with keys:
+      'spreadsheets' — paths with .xlsx/.xls/.csv extension
+      'others'       — everything else
+    """
+    from pathlib import Path as _Path
+    result: dict = {"spreadsheets": [], "others": []}
+    for p in attached_files:
+        ext = _Path(p).suffix.lower()
+        if ext in _SPREADSHEET_EXTS:
+            result["spreadsheets"].append(p)
+        else:
+            result["others"].append(p)
+    return result
+
+
 def _build_augmented_plan_messages(goal: str, attached_files: list[str]) -> list[dict]:
     """
     Build planning messages with an explicit attached-files block
     so the planner sees them as structured context, not text to parse.
+
+    When spreadsheet files (.xlsx/.xls/.csv) are present, the prompt includes
+    an explicit MANDATORY directive that overrides the general-knowledge shortcut
+    rule — this is the fix for the priority-ordering regression where the planner
+    was firing the empty-plan general-knowledge path instead of calling
+    analyze_spreadsheet.
     """
-    from app.orchestrator.orchestrator import _PLANNING_SYSTEM_PROMPT
+    classified = _classify_attached_files(attached_files)
+    spreadsheets = classified["spreadsheets"]
+    others = classified["others"]
+
     augmented_goal = goal
     if attached_files:
         file_block = "\n".join(f"  - {p}" for p in attached_files)
@@ -188,6 +220,22 @@ def _build_augmented_plan_messages(goal: str, attached_files: list[str]) -> list
             f"Attached files available for tool use (use exact paths in tool_args):\n"
             f"{file_block}"
         )
+
+    if spreadsheets:
+        # Explicit override: the general-knowledge / empty-plan rule must NOT
+        # fire when a spreadsheet is present. Give the planner a concrete
+        # mandatory step so it cannot return [].
+        spreadsheet_block = "\n".join(f"  - {p}" for p in spreadsheets)
+        augmented_goal += (
+            "\n\n"
+            "MANDATORY OVERRIDE — A spreadsheet file has been uploaded. "
+            "You MUST include an 'analyze_spreadsheet' step in your plan. "
+            "Do NOT return an empty array []. "
+            "The GENERAL KNOWLEDGE RULE does not apply when files are attached. "
+            "Set tool_args.file_path to the exact path below:\n"
+            f"{spreadsheet_block}"
+        )
+
     messages = _build_plan_messages(augmented_goal)
     return messages
 
@@ -266,6 +314,44 @@ async def run_with_streaming(
         _push(queue, SSE_DONE, request_id, {})
         await _alog(EventType.AGENT_ACTION, "planning_failed", {"error": str(exc)})
         return run
+
+    # ── FIX: Guard against the general-knowledge shortcut when files exist ──
+    # If the planner returned an empty plan but spreadsheet files are attached,
+    # the model wrongly triggered the general-knowledge fallback instead of
+    # calling analyze_spreadsheet.  Force-inject the correct tool step.
+    if not plan and attached_files:
+        classified = _classify_attached_files(attached_files)
+        if classified["spreadsheets"]:
+            _log.warning(
+                "Planner returned empty plan despite attached spreadsheet(s) "
+                "(request_id=%s) — force-injecting analyze_spreadsheet step",
+                request_id,
+            )
+            from app.orchestrator.state import PlannedStep as _PlannedStep
+            plan = [
+                _PlannedStep(
+                    step_index=0,
+                    tool_name="analyze_spreadsheet",
+                    tool_args={"file_path": classified["spreadsheets"][0]},
+                    description="Analyze the uploaded spreadsheet file and produce a summary.",
+                )
+            ]
+
+    # ── FIX: Auto-fill file_path when planner emits step but omits the arg ─
+    # The planner may correctly choose analyze_spreadsheet but leave file_path
+    # empty or missing.  If exactly one spreadsheet is attached, fill it in.
+    if attached_files:
+        classified = _classify_attached_files(attached_files)
+        if classified["spreadsheets"]:
+            for step in plan:
+                if step.tool_name == "analyze_spreadsheet" and not step.tool_args.get("file_path"):
+                    step.tool_args["file_path"] = classified["spreadsheets"][0]
+                    _log.info(
+                        "Auto-filled file_path=%s for analyze_spreadsheet step "
+                        "(request_id=%s)",
+                        classified["spreadsheets"][0],
+                        request_id,
+                    )
 
     run.plan = plan
     _push(

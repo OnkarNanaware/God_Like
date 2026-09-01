@@ -101,6 +101,38 @@ Output format — a JSON array, NOTHING else, no markdown fences:
   ...
 ]
 
+DELIVERABLE GENERATION RULES — these are mandatory, read carefully:
+
+The tools generate_docx, generate_pptx, and generate_xlsx (collectively
+"generation tools") produce files that are delivered to the user as
+downloads. They MUST appear in the plan ONLY when the user's goal explicitly
+requests a file or document as output.
+
+Phrases that ARE explicit generation requests (generation tool ALLOWED):
+  "prepare an approval note", "give me the inspection report as a Word file",
+  "generate a document", "save this as a spreadsheet", "create a report",
+  "produce a .docx", "write out the findings as a file", "download this",
+  "I need a Word document", "make a PowerPoint", "export as Excel"
+
+Phrases that are NOT generation requests — answer in chat only, NO generation step:
+  "what does this report say", "summarize the findings", "is this compliant",
+  "check this against the SOP", "tell me the key issues", "explain this document",
+  "what are the recommendations", "analyse this spreadsheet", "what does X mean",
+  or any question whose answer fits naturally in a text response
+
+AMBIGUITY RULE: If the goal could be interpreted either way, default to a
+chat-only text answer. Do NOT include a generation tool step unless the
+request is unambiguously asking for a file. An unwanted file delivered to
+the user is a worse outcome than the user asking again.
+
+GENERAL KNOWLEDGE RULE: If the goal is a conceptual or definitional question
+that you can answer from general knowledge — e.g. "What is OISD?", "What does
+API stand for?", "Explain what a heat exchanger does" — return an EMPTY array
+[]. Do NOT call rag_search, file_read, or any other tool. An empty plan causes
+the system to answer directly from the model's own knowledge and is the CORRECT
+behaviour for general-knowledge questions. RAG is for retrieving specific
+documents from the organisation's internal corpus, not for answering concepts.
+
 CRITICAL RULES — violating any of these will cause the agent to fail:
 - Output only the JSON array. No prose, no markdown fences, no code blocks.
 - You MUST use only tool names that appear EXACTLY in the available tools list above.
@@ -108,8 +140,9 @@ CRITICAL RULES — violating any of these will cause the agent to fail:
 tool not explicitly listed.
 - tool_args keys must match the required fields in each tool's input_schema exactly.
 - Keep the plan minimal — fewest steps that accomplish the goal.
-- If reading a file is needed, use 'file_read' with a 'path' argument.
+- If reading a file is needed, use 'file_read' with a 'path' argument.\
 """.strip()
+
 
 _REPLAN_SYSTEM_PROMPT = """\
 You are the re-planning component of an AI agent. A previous step failed. \
@@ -137,6 +170,25 @@ the outputs of all completed steps, produce a final response that directly \
 addresses the goal.
 
 Be concise. Refer to specific findings from the tool outputs where relevant.
+
+IMPORTANT: if the tool outputs section is empty or absent (no tools were called \
+because the question can be answered directly from general knowledge), produce \
+a direct, helpful answer from your own knowledge. ALWAYS prefix such answers with:
+
+⚠️ General knowledge — not from an internal document.
+
+Answers derived from retrieved internal documents should NOT include this prefix.
+""".strip()
+
+_DIRECT_ANSWER_SYSTEM_PROMPT = """\
+You are a knowledgeable assistant. The user has asked a general question that \
+does not require any internal documents, files, or tools to answer. Answer \
+directly, clearly, and helpfully from your own knowledge.
+
+ALWAYS start your response with:
+⚠️ General knowledge — not from an internal document.
+
+Then provide the answer on the next line.
 """.strip()
 
 
@@ -564,11 +616,66 @@ class Orchestrator:
         return result
 
     async def _synthesise(self, goal: str, run: OrchestratorRun) -> str:
-        """Ask the LLM to produce a final answer from accumulated step outputs."""
-        if not run.context_snippets:
-            return "No tool outputs were collected — the plan produced no results."
+        """
+        Produce a final answer from accumulated step outputs.
 
-        messages = _build_synthesis_messages(goal, run.context_snippets)
+        If no tool outputs were collected (empty plan / direct-answer path),
+        the LLM is asked to answer directly from its own knowledge, and the
+        response is labelled as "⚠️ General knowledge — not from an internal document."
+
+        If tool outputs exist, the LLM synthesises from those outputs.  If all
+        the outputs came from an empty RAG result, the synthesis prompt instructs
+        the model to fall back to general knowledge and label accordingly.
+        """
+        # ── Direct-answer path (empty plan: no tools were called) ───────────
+        if not run.context_snippets:
+            messages = [
+                {"role": "system", "content": _DIRECT_ANSWER_SYSTEM_PROMPT},
+                {"role": "user", "content": goal},
+            ]
+            try:
+                resp = await self._llm.chat_completion(
+                    messages,
+                    request_id=run.request_id,
+                    temperature=0.3,
+                    max_tokens=1024,
+                )
+                return resp.content
+            except Exception as exc:
+                _log.warning("Direct-answer synthesis failed (request_id=%s): %s", run.request_id, exc)
+                return (
+                    "⚠️ General knowledge — not from an internal document.\n\n"
+                    f"(Synthesis step failed: {exc})"
+                )
+
+        # ── Tool-grounded synthesis path ─────────────────────────────────
+        # Detect whether all context came from empty RAG results, so the
+        # synthesis prompt can instruct the model to fall back to general knowledge.
+        all_rag_empty = all(
+            "0 results" in snippet or "no results" in snippet.lower()
+            or "returned 0" in snippet.lower()
+            for snippet in run.context_snippets
+            if "rag_search" in snippet or "[Step" in snippet
+        ) and any(
+            "rag_search" in snippet for snippet in run.context_snippets
+        )
+
+        if all_rag_empty:
+            # All RAG calls returned nothing: answer from general knowledge, labelled.
+            messages = [
+                {"role": "system", "content": _DIRECT_ANSWER_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        f"{goal}\n\n"
+                        "(The internal document corpus returned no relevant results "
+                        "for this question. Answer from general knowledge.)"
+                    ),
+                },
+            ]
+        else:
+            messages = _build_synthesis_messages(goal, run.context_snippets)
+
         try:
             resp = await self._llm.chat_completion(
                 messages,

@@ -225,7 +225,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             exc,
         )
 
-    # ── Phase E: Orchestrator singleton ───────────────────────────────
+    # ── AnalyzeSpreadsheetTool (Phase D/E — no extra deps, uses default LLM) ──
+    # Uses the default text client for summarisation.  Registers independently
+    # of Qdrant / Vision so a failure in either does not affect this tool.
+    try:
+        from app.tools.registry import register_tool  # idempotent
+        from app.tools.analyze_spreadsheet import AnalyzeSpreadsheetTool
+
+        register_tool(
+            AnalyzeSpreadsheetTool(
+                llm_client=_default_client,
+                audit_logger=_audit_logger,
+            )
+        )
+        _log.info("AnalyzeSpreadsheetTool registered — .xlsx/.xls/.csv analysis available")
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "AnalyzeSpreadsheetTool registration failed (%s) — spreadsheet analysis unavailable",
+            exc,
+        )
+
+
     try:
         from app.orchestrator.orchestrator import Orchestrator
         _orchestrator = Orchestrator(

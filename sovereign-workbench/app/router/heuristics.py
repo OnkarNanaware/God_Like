@@ -45,6 +45,7 @@ class Capability(str, Enum):
     DOCUMENT_VISION = "document_vision"
     CHART_ANALYSIS = "chart_analysis"
     EMBEDDING = "embedding"
+    SPREADSHEET_ANALYSIS = "spreadsheet_analysis"  # Phase D–E: .xlsx/.xls/.csv uploads
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +93,11 @@ _CODE_EXTENSIONS: frozenset[str] = frozenset(
         ".sh", ".bash", ".zsh", ".fish", ".yaml", ".yml", ".json",
         ".toml", ".tf", ".hcl", ".sql", ".r", ".m", ".pl",
     }
+)
+
+# File extensions that route to the spreadsheet analysis tool.
+_SPREADSHEET_EXTENSIONS: frozenset[str] = frozenset(
+    {".xlsx", ".xls", ".csv"}
 )
 
 # Keyword patterns that signal a code/debugging task.
@@ -191,6 +197,15 @@ def run_heuristics(
                         capability=Capability.CODE_GENERATION,
                         confidence=0.88,
                         reason=f"attached file '{fname}' has code extension '{ext}'",
+                        source="file_type",
+                    )
+                )
+            elif ext in _SPREADSHEET_EXTENSIONS:
+                signals.append(
+                    HeuristicSignal(
+                        capability=Capability.SPREADSHEET_ANALYSIS,
+                        confidence=0.95,
+                        reason=f"attached file '{fname}' has spreadsheet extension '{ext}'",
                         source="file_type",
                     )
                 )
