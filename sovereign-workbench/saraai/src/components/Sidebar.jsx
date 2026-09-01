@@ -63,7 +63,7 @@ export default function Sidebar({
       <div className="sidebar-header">
         <div className="brand-wrapper" onClick={() => onSelect(conversations[0]?.id)}>
           <LogoIcon size={22} />
-          <span className="brand-title">Sa-Ra AI</span>
+          <span className="brand-title">SARA</span>
         </div>
       </div>
 
@@ -164,7 +164,7 @@ export default function Sidebar({
           <KeyboardIcon size={16} />
           <span>Keyboard shortcuts</span>
         </button>
-        <button className="sidebar-link" onClick={() => alert('Sa-Ra AI Help & Documentation')}>
+        <button className="sidebar-link" onClick={() => alert('SARA Help & Documentation')}>
           <HelpIcon size={16} />
           <span>Help & FAQ</span>
         </button>
