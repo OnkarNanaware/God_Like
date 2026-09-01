@@ -300,6 +300,16 @@ html, body, #root {
   color: var(--text-main);
 }
 
+.sidebar-link-danger {
+  color: #f87171;
+  opacity: 0.75;
+}
+.sidebar-link-danger:hover {
+  background: rgba(248, 113, 113, 0.1);
+  color: #f87171;
+  opacity: 1;
+}
+
 .sidebar-user {
   display: flex;
   align-items: center;
@@ -1126,4 +1136,17 @@ html, body, #root {
     padding: 10px 14px;
     min-width: 130px;
   }
+}
+
+/* ---------------------------------------------------------------------------
+   Voice input — mic-pulse animation
+   Used by Composer.jsx when SpeechRecognition is active
+   --------------------------------------------------------------------------- */
+@keyframes mic-pulse {
+  0%, 100% { opacity: 1;   transform: scale(1);    }
+  50%       { opacity: 0.6; transform: scale(1.15); }
+}
+
+.composer-tool-btn.mic-active {
+  color: #f87171;
 }

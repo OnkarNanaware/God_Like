@@ -14,9 +14,34 @@ import mockConversations from './data/mockConversations'
 import { HamburgerIcon, SparkleIcon, FolderIcon, ShieldIcon } from './components/Icons'
 import { submitGoal, streamRun } from './hooks/useBackend'
 
+// ---------------------------------------------------------------------------
+// localStorage helpers for history persistence
+// ---------------------------------------------------------------------------
+const LS_CONVERSATIONS = 'saraai_conversations'
+const LS_ACTIVE_ID     = 'saraai_active_id'
+
+function loadConversations() {
+  try {
+    const raw = localStorage.getItem(LS_CONVERSATIONS)
+    if (raw) return JSON.parse(raw)
+  } catch (_) { /* corrupt data — fall through */ }
+  return mockConversations
+}
+
+function loadActiveId(convs) {
+  try {
+    const saved = localStorage.getItem(LS_ACTIVE_ID)
+    if (saved && convs.some(c => c.id === saved)) return saved
+  } catch (_) { /* fall through */ }
+  return convs[0]?.id || 'c-pv101'
+}
+
 export default function App() {
-  const [conversations, setConversations] = useState(mockConversations)
-  const [activeId, setActiveId] = useState(conversations[0]?.id || 'c-pv101')
+  const [conversations, setConversations] = useState(() => loadConversations())
+  const [activeId, setActiveId] = useState(() => {
+    const convs = loadConversations()
+    return loadActiveId(convs)
+  })
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [showSettings, setShowSettings] = useState(false)
   const [settingsTab, setSettingsTab] = useState('appearance')
@@ -63,6 +88,22 @@ export default function App() {
   }, [])
 
   // ---------------------------------------------------------------------------
+  // Persist conversations + activeId to localStorage on every change
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    try {
+      localStorage.setItem(LS_CONVERSATIONS, JSON.stringify(conversations))
+    } catch (_) { /* storage quota exceeded — silently ignore */ }
+  }, [conversations])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(LS_ACTIVE_ID, activeId)
+    } catch (_) { /* silently ignore */ }
+  }, [activeId])
+
+
+  // ---------------------------------------------------------------------------
   // Conversation helpers
   // ---------------------------------------------------------------------------
   function handleNewChat() {
@@ -92,6 +133,16 @@ export default function App() {
         }
       })
     )
+  }
+
+  // Clear all persisted history from state + localStorage
+  function handleClearHistory() {
+    try {
+      localStorage.removeItem(LS_CONVERSATIONS)
+      localStorage.removeItem(LS_ACTIVE_ID)
+    } catch (_) { /* ignore */ }
+    setConversations(mockConversations)
+    setActiveId(mockConversations[0]?.id || 'c-pv101')
   }
 
   // ---------------------------------------------------------------------------
@@ -318,6 +369,7 @@ export default function App() {
           setShowSettings(true)
         }}
         onOpenProfile={() => setProfileOpen(v => !v)}
+        onClearHistory={handleClearHistory}
       />
 
       {/* Main Viewport */}

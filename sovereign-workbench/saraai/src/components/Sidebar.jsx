@@ -6,7 +6,8 @@ import {
   ChatBubbleIcon,
   SettingsIcon,
   KeyboardIcon,
-  HelpIcon
+  HelpIcon,
+  TrashIcon
 } from './Icons'
 
 export default function Sidebar({
@@ -16,7 +17,8 @@ export default function Sidebar({
   onSelect,
   onNewChat,
   onOpenSettings,
-  onOpenProfile
+  onOpenProfile,
+  onClearHistory
 }) {
   const [searchQuery, setSearchQuery] = useState('')
 
@@ -165,6 +167,19 @@ export default function Sidebar({
         <button className="sidebar-link" onClick={() => alert('Sa-Ra AI Help & Documentation')}>
           <HelpIcon size={16} />
           <span>Help & FAQ</span>
+        </button>
+
+        <button
+          className="sidebar-link sidebar-link-danger"
+          onClick={() => {
+            if (window.confirm('Clear all chat history? This cannot be undone.')) {
+              onClearHistory?.()
+            }
+          }}
+          title="Clear all chat history"
+        >
+          <TrashIcon size={16} />
+          <span>Clear History</span>
         </button>
 
         <div className="sidebar-user" onClick={onOpenProfile}>

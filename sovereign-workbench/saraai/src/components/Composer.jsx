@@ -1,6 +1,13 @@
 import React, { useState, useRef, useEffect } from 'react'
 import { PaperclipIcon, MicIcon, ArrowUpIcon, FileIcon, CloseIcon } from './Icons'
 
+// ---------------------------------------------------------------------------
+// Web Speech API – voice input
+// ---------------------------------------------------------------------------
+const SpeechRecognition =
+  typeof window !== 'undefined' &&
+  (window.SpeechRecognition || window.webkitSpeechRecognition)
+
 /**
  * Composer
  * ========
@@ -13,7 +20,9 @@ import { PaperclipIcon, MicIcon, ArrowUpIcon, FileIcon, CloseIcon } from './Icon
 export default function Composer({ onSend, onOpenHelp, disabled = false }) {
   const [text, setText] = useState('')
   const [attachedFiles, setAttachedFiles] = useState([])  // array of File objects
+  const [isListening, setIsListening] = useState(false)
   const textareaRef = useRef(null)
+  const recognitionRef = useRef(null)
 
   useEffect(() => {
     if (!disabled) {
@@ -69,6 +78,70 @@ export default function Composer({ onSend, onOpenHelp, disabled = false }) {
   }
 
   const canSend = !disabled && (text.trim().length > 0 || attachedFiles.length > 0)
+
+  // ---------------------------------------------------------------------------
+  // Voice input — Web Speech API
+  // ---------------------------------------------------------------------------
+  function toggleVoiceInput() {
+    if (!SpeechRecognition) {
+      alert('Your browser does not support speech recognition. Try Chrome or Edge.')
+      return
+    }
+
+    // Stop if already listening
+    if (isListening && recognitionRef.current) {
+      recognitionRef.current.stop()
+      return
+    }
+
+    const recognition = new SpeechRecognition()
+    recognition.lang = 'en-US'
+    recognition.interimResults = true
+    recognition.continuous = false
+    recognitionRef.current = recognition
+
+    let finalTranscript = ''
+
+    recognition.onstart = () => setIsListening(true)
+
+    recognition.onresult = (event) => {
+      let interim = ''
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        if (event.results[i].isFinal) {
+          finalTranscript += event.results[i][0].transcript
+        } else {
+          interim += event.results[i][0].transcript
+        }
+      }
+      // Show interim in the textarea for live feedback
+      setText(prev => {
+        const base = prev.replace(/\[listening….*\]$/, '').trimEnd()
+        return interim
+          ? base + (base ? ' ' : '') + `[listening… ${interim}]`
+          : base
+      })
+    }
+
+    recognition.onend = () => {
+      setIsListening(false)
+      recognitionRef.current = null
+      // Commit the final transcript — strip any leftover [listening… …] placeholder
+      setText(prev => {
+        const clean = prev.replace(/\[listening….*?\]/g, '').trim()
+        return finalTranscript
+          ? (clean ? clean + ' ' : '') + finalTranscript
+          : clean
+      })
+    }
+
+    recognition.onerror = (e) => {
+      console.error('Speech recognition error', e.error)
+      setIsListening(false)
+      recognitionRef.current = null
+    }
+
+    recognition.start()
+  }
 
   return (
     <div className="composer-outer-wrapper">
@@ -150,10 +223,12 @@ export default function Composer({ onSend, onOpenHelp, disabled = false }) {
           <div className="composer-right-tools">
             <button
               type="button"
-              className="composer-tool-btn"
-              title="Voice Input"
-              onClick={() => alert('Voice input activated (listening...)')}
+              className={`composer-tool-btn${isListening ? ' mic-active' : ''}`}
+              title={isListening ? 'Stop recording' : 'Voice Input'}
+              onClick={toggleVoiceInput}
               disabled={disabled}
+              aria-label={isListening ? 'Stop voice recording' : 'Start voice input'}
+              style={isListening ? { color: '#f87171', animation: 'mic-pulse 1s ease-in-out infinite' } : undefined}
             >
               <MicIcon size={18} />
             </button>
