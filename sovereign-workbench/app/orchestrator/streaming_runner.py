@@ -31,9 +31,16 @@ Event types
                       ``error`` (if failed).
 ``retry``           — a step is being retried; payload has ``step_index``,
                       ``tool_name``, ``attempt``, ``error``.
+``artifact_created``— a docgen tool succeeded and the artifact is registered;
+                      payload is ``Artifact.to_dict()`` (no physical_path).
+``artifact_failed`` — artifact registration failed after the document was written
+                      (storage error, sanitization error, etc.); payload has
+                      ``filename`` and ``error``.  Note: normal doc-gen tool
+                      failures emit ``step_done(success=False)``, NOT this event.
 ``synthesis_start`` — final synthesis LLM call beginning.
 ``completed``       — run finished; payload has ``final_output``,
-                      ``sources`` (RAG citations extracted), ``output_files``.
+                      ``sources`` (RAG citations extracted), ``artifacts`` (list of
+                      Artifact.to_dict() for all generated files).
 ``failed``          — run failed; payload has ``failure_summary``.
 ``done``            — sentinel; queue consumer should stop.
 
@@ -85,6 +92,8 @@ SSE_PLAN_READY = "plan_ready"
 SSE_STEP_START = "step_start"
 SSE_STEP_DONE = "step_done"
 SSE_RETRY = "retry"
+SSE_ARTIFACT_CREATED = "artifact_created"  # fired immediately when a docgen tool succeeds
+SSE_ARTIFACT_FAILED  = "artifact_failed"   # fired only for artifact registration failures
 SSE_SYNTHESIS_START = "synthesis_start"
 SSE_COMPLETED = "completed"
 SSE_FAILED = "failed"
@@ -141,37 +150,26 @@ def _extract_sources(run: OrchestratorRun) -> list[dict]:
     return sources
 
 
-def _extract_output_files(run: OrchestratorRun) -> list[str]:
+def _extract_artifacts(run: OrchestratorRun) -> list[dict]:
     """
-    Collect file paths produced by doc-gen / sandbox tools for UI download links.
+    Collect artifact dicts from step outcomes that have ``metadata["artifact"]``.
 
-    Looks for string outputs that look like local file paths ending in
-    .docx / .pptx / .xlsx / .py / .js (the output types Phase D can produce).
+    Uses explicit metadata inspection — no string-path heuristics.
+    Returns a list of ``Artifact.to_dict()`` payloads (no ``physical_path``).
     """
-    file_exts = {".docx", ".pptx", ".xlsx", ".py", ".js", ".ts", ".txt"}
-    files: list[str] = []
+    artifacts: list[dict] = []
     seen: set[str] = set()
     for outcome in run.outcomes:
-        if not outcome.success or outcome.output is None:
+        if not outcome.success:
             continue
-        raw = outcome.output
-        candidates: list[str] = []
-        if isinstance(raw, str):
-            candidates = [raw.strip()]
-        elif isinstance(raw, dict):
-            for v in raw.values():
-                if isinstance(v, str):
-                    candidates.append(v.strip())
-        for c in candidates:
-            from pathlib import Path as _Path
-            try:
-                p = _Path(c)
-                if p.suffix.lower() in file_exts and c not in seen:
-                    seen.add(c)
-                    files.append(c)
-            except Exception:
-                pass
-    return files
+        art = outcome.metadata.get("artifact") if outcome.metadata else None
+        if not isinstance(art, dict):
+            continue
+        artifact_id = art.get("artifact_id")
+        if artifact_id and artifact_id not in seen:
+            seen.add(artifact_id)
+            artifacts.append(art)
+    return artifacts
 
 
 # Spreadsheet extensions that should always trigger analyze_spreadsheet
@@ -496,6 +494,7 @@ async def run_with_streaming(
                 output=result.output,
                 error=result.error,
                 attempt=attempt,
+                metadata=result.metadata or {},
             )
             run.outcomes.append(outcome)
 
@@ -525,7 +524,23 @@ async def run_with_streaming(
                 run.context_snippets.append(snippet)
                 step_done = True
 
+                # ── Emit artifact_created immediately for docgen steps ─────────
+                # metadata["artifact"] is set by generate_docx/pptx/xlsx tools
+                # only when registration succeeded.  Physical_path is NOT in it.
+                art = result.metadata.get("artifact") if result.metadata else None
+                if isinstance(art, dict):
+                    _push(queue, SSE_ARTIFACT_CREATED, request_id, art)
+
             else:
+                # ── Emit artifact_failed for registration failures only ────────
+                # metadata["artifact_error"] is set when the document was written
+                # but ArtifactManager.register_artifact() raised ArtifactError.
+                # Normal doc-gen tool failures (invalid input, library crash) only
+                # produce step_done(success=False) — they do NOT set artifact_error.
+                art_err = result.metadata.get("artifact_error") if result.metadata else None
+                if isinstance(art_err, dict):
+                    _push(queue, SSE_ARTIFACT_FAILED, request_id, art_err)
+
                 if attempt < orchestrator._max_retries:
                     run.status = OrchestratorStatus.REPLANNING
                     _push(
@@ -574,7 +589,7 @@ async def run_with_streaming(
     run.final_output = await orchestrator._synthesise(goal, run)
 
     sources = _extract_sources(run)
-    output_files = _extract_output_files(run)
+    artifacts = _extract_artifacts(run)
 
     _push(
         queue,
@@ -583,7 +598,7 @@ async def run_with_streaming(
         {
             "final_output": run.final_output,
             "sources": sources,
-            "output_files": output_files,
+            "artifacts": artifacts,
         },
     )
     _push(queue, SSE_DONE, request_id, {})

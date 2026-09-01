@@ -727,10 +727,15 @@ class TestGenerationGating:
         assert gen_outcomes, "generate_docx step not found in outcomes"
         assert gen_outcomes[0].success is True, \
             f"generate_docx failed: {gen_outcomes[0].error}"
-        # Confirm the file was actually created
-        output_path = Path(gen_outcomes[0].output)
+        # Confirm the file was actually created via ArtifactManager
+        art = gen_outcomes[0].metadata.get("artifact")
+        assert art is not None, "metadata['artifact'] missing from generate_docx outcome"
+        assert "physical_path" not in art
+        from app.artifacts.manager import get_artifact_manager
+        output_path = get_artifact_manager().get_artifact(art["artifact_id"]).physical_path
         assert output_path.exists(), f"Generated file not found at {output_path}"
         assert output_path.suffix == ".docx"
+
 
     # ── Test 19: ambiguous goal → defaults to NO generation ─────────────
 
@@ -851,7 +856,10 @@ class TestGenerateDocxRouting:
 
         # Open and verify it has template-exact structure
         from docx import Document
-        doc = Document(result.output)
+        from app.artifacts.manager import get_artifact_manager
+        art = result.metadata["artifact"]
+        output_path = get_artifact_manager().get_artifact(art["artifact_id"]).physical_path
+        doc = Document(str(output_path))
         headings = [p.text for p in doc.paragraphs if p.style.name.startswith("Heading")]
         assert any("INSPECTION REPORT" in h for h in headings)
         assert any("Facility Manager" in h for h in headings)
@@ -879,7 +887,10 @@ class TestGenerateDocxRouting:
         assert result.metadata["section_count"] == 5
 
         from docx import Document
-        doc = Document(result.output)
+        from app.artifacts.manager import get_artifact_manager
+        art = result.metadata["artifact"]
+        output_path = get_artifact_manager().get_artifact(art["artifact_id"]).physical_path
+        doc = Document(str(output_path))
         headings = [p.text for p in doc.paragraphs if p.style.name.startswith("Heading")]
         assert any("APPROVAL NOTE" in h for h in headings)
         assert any("Approved By" in h for h in headings)

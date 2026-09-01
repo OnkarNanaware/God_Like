@@ -243,7 +243,18 @@ class TestGenerateDocxTool:
         ))
 
         assert result.success is True, f"Expected success, got: {result.error}"
-        output_path = Path(result.output)
+        # result.output is now the sanitized filename; physical path is in the artifact
+        assert "artifact" in result.metadata, "metadata['artifact'] must be present"
+        art = result.metadata["artifact"]
+        assert "physical_path" not in art, "physical_path must NOT appear in to_dict()"
+        assert art["artifact_id"], "artifact_id must be non-empty"
+        assert art["filename"].endswith(".docx")
+        assert art["download_url"] == f"/outputs/{art['artifact_id']}"
+
+        # Get the physical path directly from the ArtifactManager for content checks
+        from app.artifacts.manager import get_artifact_manager
+        artifact_obj = get_artifact_manager().get_artifact(art["artifact_id"])
+        output_path = artifact_obj.physical_path
         assert output_path.exists(), "Output file not found"
         assert output_path.suffix == ".docx"
 
@@ -275,8 +286,11 @@ class TestGenerateDocxTool:
         assert result.success is True, f"error: {result.error}"
         assert result.metadata["table_rows"] == 2
 
+        from app.artifacts.manager import get_artifact_manager
+        art = result.metadata["artifact"]
+        output_path = get_artifact_manager().get_artifact(art["artifact_id"]).physical_path
         from docx import Document
-        doc = Document(result.output)
+        doc = Document(str(output_path))
         assert len(doc.tables) >= 1, "Expected at least one table in the docx"
         table = doc.tables[0]
         # Header row + 2 data rows = 3 rows
@@ -325,7 +339,13 @@ class TestGeneratePptxTool:
         ))
 
         assert result.success is True, f"error: {result.error}"
-        output_path = Path(result.output)
+        # result.output is now the sanitized filename; physical path via ArtifactManager
+        art = result.metadata["artifact"]
+        assert "physical_path" not in art
+        assert art["filename"].endswith(".pptx")
+
+        from app.artifacts.manager import get_artifact_manager
+        output_path = get_artifact_manager().get_artifact(art["artifact_id"]).physical_path
         assert output_path.exists()
         assert output_path.suffix == ".pptx"
 
@@ -351,8 +371,11 @@ class TestGeneratePptxTool:
         ))
 
         assert result.success is True
+        from app.artifacts.manager import get_artifact_manager
+        art = result.metadata["artifact"]
+        output_path = get_artifact_manager().get_artifact(art["artifact_id"]).physical_path
         from pptx import Presentation
-        prs = Presentation(result.output)
+        prs = Presentation(str(output_path))
         titles = [
             sl.shapes.title.text
             for sl in prs.slides
@@ -391,7 +414,13 @@ class TestGenerateXlsxTool:
         ))
 
         assert result.success is True, f"error: {result.error}"
-        output_path = Path(result.output)
+        # result.output is now the sanitized filename; physical path via ArtifactManager
+        art = result.metadata["artifact"]
+        assert "physical_path" not in art
+        assert art["filename"].endswith(".xlsx")
+
+        from app.artifacts.manager import get_artifact_manager
+        output_path = get_artifact_manager().get_artifact(art["artifact_id"]).physical_path
         assert output_path.exists()
         assert output_path.suffix == ".xlsx"
 
@@ -426,8 +455,11 @@ class TestGenerateXlsxTool:
         ))
 
         assert result.success is True
+        from app.artifacts.manager import get_artifact_manager
+        art = result.metadata["artifact"]
+        output_path = get_artifact_manager().get_artifact(art["artifact_id"]).physical_path
         import openpyxl
-        wb = openpyxl.load_workbook(result.output)
+        wb = openpyxl.load_workbook(str(output_path))
         ws = wb.active
         # Row 5 should be the formula row (header + 3 data + formula)
         assert ws["A5"].value == "Total"
@@ -515,8 +547,12 @@ class TestOrchestratorIntegration:
             f"Expected COMPLETED, got {run.status}. Failure: {run.failure_summary}"
         )
         assert run.outcomes[0].success is True, f"Tool failed: {run.outcomes[0].error}"
-        output_path = Path(run.outcomes[0].output)
+        art = run.outcomes[0].metadata.get("artifact")
+        assert art is not None, "metadata['artifact'] missing from docx outcome"
+        from app.artifacts.manager import get_artifact_manager
+        output_path = get_artifact_manager().get_artifact(art["artifact_id"]).physical_path
         assert output_path.exists()
+
 
     # ── Test 13: generate_pptx callable in a plan ─────────────────────────
 

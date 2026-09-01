@@ -54,6 +54,7 @@ class StepOutcome:
     output: Any
     error: Optional[str]
     attempt: int  # 1-based retry counter
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

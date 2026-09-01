@@ -8,14 +8,14 @@ Phase E API endpoints wired to the backend:
   POST /orchestrator/run         — submit a goal + optional files; returns request_id immediately
   GET  /orchestrator/stream/{id} — SSE stream of agent progress for a running request
   GET  /audit/recent             — last N audit records (optionally filtered by request_id)
-  GET  /outputs/{filename}       — safe file download with path-traversal prevention
+  GET  /outputs/{artifact_id}    — artifact download by UUID; path-traversal-safe
 
 Security notes
 --------------
-- ``GET /outputs/{filename}``:  filename is validated to contain no path
-  separators (``/``, ``\\``, ``..``).  The resolved path is checked to be
-  inside OUTPUTS_DIR before the file is opened.  Returns 400 for invalid
-  filenames, 404 for missing files.
+- ``GET /outputs/{artifact_id}``:  artifact_id must match the pattern ``^[0-9a-f]{32}$``
+  (32-character hex UUID4).  Requests with any other format return 400 immediately,
+  before any registry or filesystem access.  No path components, separators, or
+  ``..`` sequences can appear in a valid UUID hex string.
 - Uploaded files land in UPLOADS_DIR (separate from generated OUTPUTS_DIR).
   Client-supplied filenames are sanitized: only the ``Path.name`` component
   is kept, a UUID prefix is prepended, and any remaining path traversal
@@ -52,6 +52,8 @@ from typing import Any, AsyncGenerator, Optional
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
+
+from app.artifacts.manager import get_artifact_manager
 
 _log = logging.getLogger("sovereign.routers.orchestrator")
 
@@ -136,51 +138,29 @@ def _safe_filename(client_name: str) -> str:
     return f"{uuid.uuid4().hex}_{safe}"
 
 
-def _validate_output_filename(filename: str) -> Path:
-    """
-    Validate *filename* is safe to serve from OUTPUTS_DIR.
+# 32-char lowercase hex UUID4 — the only valid artifact_id format.
+# No path separators, dots, or traversal sequences can appear in this pattern.
+_ARTIFACT_ID_RE = re.compile(r'^[0-9a-f]{32}$')
 
-    Returns the resolved ``Path`` on success.
 
-    Raises
-    ------
-    HTTPException 400 — filename contains path separators or ``..``.
-    HTTPException 404 — file does not exist inside OUTPUTS_DIR.
+def _validate_artifact_id(artifact_id: str) -> None:
     """
-    # Reject obvious traversal attempts before touching the filesystem.
-    if "/" in filename or "\\" in filename or ".." in filename:
+    Raise ``HTTPException 400`` if *artifact_id* is not a valid 32-char hex UUID.
+
+    This check runs before any registry or filesystem access, so malformed IDs
+    are rejected instantly without touching the artifact store.
+    """
+    if not _ARTIFACT_ID_RE.match(artifact_id):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
-                "error": "invalid_filename",
+                "error": "invalid_artifact_id",
                 "message": (
-                    "Filename must not contain path separators or '..'. "
-                    "Request a specific file by basename only."
+                    "artifact_id must be a 32-character lowercase hex UUID "
+                    "(uuid4().hex format).  No path separators or dots allowed."
                 ),
             },
         )
-
-    candidate = (OUTPUTS_DIR / filename).resolve()
-
-    # Belt-and-suspenders: confirm the resolved path is actually inside OUTPUTS_DIR.
-    try:
-        candidate.relative_to(OUTPUTS_DIR)
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error": "path_traversal_detected",
-                "message": "The requested path resolves outside the outputs directory.",
-            },
-        )
-
-    if not candidate.exists() or not candidate.is_file():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={"error": "file_not_found", "filename": filename},
-        )
-
-    return candidate
 
 
 def _enrich_resolved_models(resolved: dict) -> list[dict]:
@@ -530,20 +510,42 @@ async def audit_recent(
     }
 
 
-@router.get("/outputs/{filename}", tags=["Files"])
-async def download_output(filename: str) -> FileResponse:
+@router.get("/outputs/{artifact_id}", tags=["Files"])
+async def download_artifact(artifact_id: str) -> FileResponse:
     """
-    Serve a generated output file (e.g. ``.docx``, ``.pptx``, ``.xlsx``).
+    Download a generated artifact (DOCX, PPTX, XLSX) by its UUID.
 
-    Path-traversal protection (Fix #1 — blocking):
-    - ``filename`` must contain no ``/``, ``\\``, or ``..``.
-    - The resolved path is checked to be inside ``outputs/`` before serving.
-    Returns 400 for invalid filenames, 404 for missing files.
-    No directory listing is exposed.
+    Security
+    --------
+    1. ``artifact_id`` is validated against ``^[0-9a-f]{32}$`` before any
+       registry or filesystem access.  Invalid format → 400.
+    2. The artifact is looked up in the in-process ``ArtifactManager`` registry.
+       Unknown ID → 404.
+    3. The physical file path is accessed from the registry internally — it is
+       NEVER received from or sent to the client.
     """
-    safe_path = _validate_output_filename(filename)
+    # Step 1: UUID format validation — rejects traversal, dots, slashes instantly
+    _validate_artifact_id(artifact_id)
+
+    # Step 2: Registry lookup
+    artifact = get_artifact_manager().get_artifact(artifact_id)
+    if artifact is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "artifact_not_found",
+                "artifact_id": artifact_id,
+                "message": (
+                    "Artifact not found.  The server may have restarted since the "
+                    "file was generated, or the ID is incorrect."
+                ),
+            },
+        )
+
+    # Step 3: Serve — physical_path accessed internally, never exposed to client
     return FileResponse(
-        path=safe_path,
-        filename=filename,
-        media_type="application/octet-stream",
+        path=artifact.physical_path,
+        media_type=artifact.mime_type,
+        filename=artifact.filename,
+        headers={"Content-Disposition": f'attachment; filename="{artifact.filename}"'},
     )

@@ -120,19 +120,36 @@ def test_outputs_security_path_traversal(client):
 
 
 def test_outputs_serves_valid_file(client, tmp_path):
-    """GET /outputs/{filename} safely serves an existing file in outputs/."""
-    outputs_dir = Path("outputs")
-    outputs_dir.mkdir(exist_ok=True)
-    test_file = outputs_dir / "test_deliverable_e.txt"
-    test_file.write_text("Sovereign Workbench Output Deliverable", encoding="utf-8")
+    """GET /outputs/{artifact_id} safely serves a registered artifact by UUID."""
+    from app.artifacts.manager import get_artifact_manager
+    manager = get_artifact_manager()
+
+    content = b"\x50\x4B\x03\x04" + b"\x00" * 60
+    src_file = tmp_path / "test_deliverable_e.docx"
+    src_file.write_bytes(content)
+
+    artifact = manager.register_artifact(
+        source_path=src_file,
+        filename="test_deliverable_e.docx",
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        artifact_type="docx",
+        request_id="test-phase-e-req",
+    )
 
     try:
-        resp = client.get(f"/outputs/{test_file.name}")
+        resp = client.get(f"/outputs/{artifact.artifact_id}")
         assert resp.status_code == 200
-        assert resp.text == "Sovereign Workbench Output Deliverable"
+        assert resp.content == content
+        assert "application/vnd.openxmlformats-officedocument" in resp.headers["content-type"]
+        assert 'filename="test_deliverable_e.docx"' in resp.headers.get("content-disposition", "")
+
+        # Non-existent valid UUID returns 404
+        resp_404 = client.get(f"/outputs/{'0' * 32}")
+        assert resp_404.status_code == 404
     finally:
-        if test_file.exists():
-            test_file.unlink()
+        if artifact.physical_path.exists():
+            artifact.physical_path.unlink(missing_ok=True)
+
 
 
 def test_orchestrator_run_and_stream(client):

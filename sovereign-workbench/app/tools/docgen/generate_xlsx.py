@@ -15,8 +15,9 @@ request_id      : str | None
 
 Output
 ------
-ToolResult.output   : absolute path to the generated file (str)
-ToolResult.metadata : {file_path, size_bytes, row_count, col_count}
+ToolResult.output   : sanitized display filename (str, e.g. "data.xlsx")
+ToolResult.metadata : {"artifact": <Artifact.to_dict()>} on success
+                      {"artifact_error": {filename, error}} if registration fails
 
 Audit
 -----
@@ -35,11 +36,14 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from app.artifacts.manager import ArtifactError, get_artifact_manager
 from app.audit.logger import AuditLogger, EventType
 from app.tools.base import BaseTool, ToolResult
 
 _log = logging.getLogger("sovereign.tools.docgen.generate_xlsx")
 
+# Output directory — the generator writes here first; ArtifactManager renames
+# to a UUID-prefixed path atomically.
 _OUTPUT_DIR = Path(__file__).resolve().parents[3] / "outputs" / "generated"
 
 
@@ -134,10 +138,32 @@ class GenerateXlsxTool(BaseTool):
             )
 
         elapsed_ms = (time.monotonic() - t0) * 1000
-        size_bytes = output_path.stat().st_size
+
+        # ── Register artifact (atomic rename → UUID-named file) ────────────
+        try:
+            manager = get_artifact_manager()
+            artifact = manager.register_artifact(
+                source_path=output_path,
+                filename=output_filename,
+                mime_type="application/vnd.openxmlformats-officedocument"
+                          ".spreadsheetml.sheet",
+                artifact_type="xlsx",
+                request_id=request_id,
+            )
+        except ArtifactError as exc:
+            _log.error(
+                "Artifact registration failed for %s: %s", output_filename, exc
+            )
+            output_path.unlink(missing_ok=True)
+            return ToolResult(
+                success=False,
+                output=None,
+                error=f"Artifact registration failed: {exc}",
+                metadata={"artifact_error": {"filename": output_filename, "error": str(exc)}},
+            )
 
         self._log_generation(
-            output_path=str(output_path),
+            output_path=str(artifact.physical_path),
             row_count=len(rows),
             col_count=len(headers),
             duration_ms=elapsed_ms,
@@ -146,10 +172,9 @@ class GenerateXlsxTool(BaseTool):
 
         return ToolResult(
             success=True,
-            output=str(output_path),
+            output=artifact.filename,
             metadata={
-                "file_path": str(output_path),
-                "size_bytes": size_bytes,
+                "artifact": artifact.to_dict(),
                 "row_count": len(rows),
                 "col_count": len(headers),
             },

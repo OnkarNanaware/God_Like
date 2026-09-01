@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react'
 import AgentActivity from './AgentActivity'
 import EmptyState from './EmptyState'
 import { AlertIcon } from './Icons'
-import { outputFileUrl } from '../hooks/useBackend'
+import { artifactDownloadUrl } from '../hooks/useBackend'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -166,20 +166,25 @@ function CitationsPanel({ sources }) {
 }
 
 // ---------------------------------------------------------------------------
-// Output file download links
+// Artifact download buttons (replaces OutputFiles)
 // ---------------------------------------------------------------------------
 
-function OutputFiles({ files }) {
-  if (!files || files.length === 0) return null
+function formatBytes(bytes) {
+  if (bytes == null) return ''
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
 
-  function extIcon(filename) {
-    const ext = filename.split('.').pop().toLowerCase()
-    if (ext === 'docx' || ext === 'doc') return '📄'
-    if (ext === 'pptx' || ext === 'ppt') return '📊'
-    if (ext === 'xlsx' || ext === 'xls') return '📈'
-    if (['py', 'js', 'ts', 'go', 'java', 'cpp', 'c'].includes(ext)) return '💻'
-    return '📎'
-  }
+function artifactIcon(artifactType) {
+  if (artifactType === 'docx') return '📄'
+  if (artifactType === 'pptx') return '📊'
+  if (artifactType === 'xlsx') return '📈'
+  return '📎'
+}
+
+function ArtifactDownloads({ artifacts }) {
+  if (!artifacts || artifacts.length === 0) return null
 
   return (
     <div style={{ marginTop: 10 }}>
@@ -189,14 +194,13 @@ function OutputFiles({ files }) {
       }}>
         📥 Generated Files
       </div>
-      {files.map((filepath, i) => {
-        const basename = filepath.split('/').pop().split('\\').pop()
-        const url = outputFileUrl(basename)
+      {artifacts.map((artifact) => {
+        const url = artifactDownloadUrl(artifact.artifact_id)
         return (
           <a
-            key={i}
+            key={artifact.artifact_id}
             href={url}
-            download={basename}
+            download={artifact.filename}
             style={{
               display: 'flex',
               alignItems: 'center',
@@ -215,9 +219,14 @@ function OutputFiles({ files }) {
             onMouseEnter={e => e.currentTarget.style.background = 'rgba(167,139,250,0.16)'}
             onMouseLeave={e => e.currentTarget.style.background = 'rgba(167,139,250,0.08)'}
           >
-            <span>{extIcon(basename)}</span>
-            <span>Download {basename}</span>
-            <span style={{ marginLeft: 'auto', fontSize: 10 }}>↓</span>
+            <span>{artifactIcon(artifact.artifact_type)}</span>
+            <span style={{ flex: 1 }}>Download {artifact.filename}</span>
+            {artifact.size_bytes != null && (
+              <span style={{ fontSize: 10.5, color: 'var(--text-dim)', marginRight: 4 }}>
+                {formatBytes(artifact.size_bytes)}
+              </span>
+            )}
+            <span style={{ fontSize: 10 }}>↓</span>
           </a>
         )
       })}
@@ -327,7 +336,7 @@ function MessageItem({ msg, onOpenAudit, onRetry }) {
         <CitationsPanel sources={msg.sources} />
 
         {/* Inline file download links */}
-        <OutputFiles files={msg.outputFiles} />
+        <ArtifactDownloads artifacts={msg.artifacts} />
 
         {/* Agentic actions row */}
         {(hasTrace || hasSources || msg.evidence) && (
