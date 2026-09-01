@@ -584,6 +584,15 @@ class Orchestrator:
                 ),
             )
 
+        # Fix (P1): strip markdown code fences from tool_args["code"] so that
+        # LLM responses containing ```python ... ``` blocks don't reach Docker
+        # as raw text (which would cause a Python SyntaxError in the container).
+        if step.tool_name == "code_sandbox" and "code" in step.tool_args:
+            raw = step.tool_args["code"].strip()
+            raw = re.sub(r"^```[a-zA-Z]*\s*\n?", "", raw)
+            raw = re.sub(r"\n?```\s*$", "", raw).strip()
+            step.tool_args["code"] = raw
+
         self._log(
             EventType.TOOL_CALL,
             run,
@@ -613,7 +622,97 @@ class Orchestrator:
                 output=None,
                 error=f"Tool raised unexpectedly: {type(exc).__name__}: {exc}",
             )
+
+        # Fix (P0): semantic verification — after a successful code_sandbox run,
+        # ask the LLM whether the actual output satisfies the original goal.
+        # This catches cases where exit_code==0 but the answer is semantically
+        # wrong (e.g. print(41) when the goal was to print 42).
+        if result.success and step.tool_name == "code_sandbox" and result.output:
+            verified, reason = await self._verify_sandbox_output(
+                goal=run.goal,
+                code=step.tool_args.get("code", ""),
+                sandbox_output=result.output,
+                run=run,
+            )
+            if not verified:
+                self._log(
+                    EventType.AGENT_ACTION, run, "verification_failed",
+                    {"step_index": step.step_index, "reason": reason},
+                )
+                result = ToolResult(
+                    success=False,
+                    output=result.output,
+                    error=f"Verification failed: {reason}",
+                    metadata=result.metadata,
+                )
+
         return result
+
+    async def _verify_sandbox_output(
+        self,
+        goal: str,
+        code: str,
+        sandbox_output: dict,
+        run: OrchestratorRun,
+    ) -> tuple[bool, str]:
+        """
+        Ask the LLM whether the sandbox output satisfies the original goal.
+
+        Returns ``(verified: bool, reason: str)``.
+
+        On any LLM error the verifier defaults to ``(True, "skipped")`` so a
+        transient model outage does not discard a genuinely correct result.
+        """
+        stdout = (sandbox_output.get("stdout") or "").strip()
+        stderr = (sandbox_output.get("stderr") or "").strip()
+        exit_code = sandbox_output.get("exit_code", 0)
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a code-output verifier. "
+                    "Given a goal, the code that was executed, and its output, "
+                    "decide whether the output correctly satisfies the goal.\n\n"
+                    "Reply with EXACTLY one of:\n"
+                    "  VERIFIED\n"
+                    "  NEEDS_CORRECTION: <one-line reason>\n\n"
+                    "No other text."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Goal: {goal}\n\n"
+                    f"Code:\n{code}\n\n"
+                    f"Exit code: {exit_code}\n"
+                    f"Stdout:\n{stdout or '(empty)'}\n"
+                    f"Stderr:\n{stderr or '(empty)'}\n\n"
+                    "Does the output satisfy the goal?"
+                ),
+            },
+        ]
+
+        try:
+            resp = await self._llm.chat_completion(
+                messages,
+                request_id=run.request_id,
+                temperature=0.0,
+                max_tokens=128,
+            )
+            content = resp.content.strip()
+            if content.upper().startswith("VERIFIED"):
+                return True, "verified"
+            reason = content.replace("NEEDS_CORRECTION:", "").strip()
+            return False, reason or "Output did not satisfy the goal."
+        except Exception as exc:
+            _log.warning(
+                "Sandbox verification LLM call failed (request_id=%s): %s "
+                "\u2014 defaulting to verified",
+                run.request_id,
+                exc,
+            )
+            return True, f"verification skipped ({exc})"
 
     async def _synthesise(self, goal: str, run: OrchestratorRun) -> str:
         """

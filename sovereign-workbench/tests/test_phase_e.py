@@ -190,20 +190,22 @@ def test_audit_recent(client, tmp_path):
     assert len(data["records"]) == 3
 
 
-@pytest.mark.asyncio
-async def test_async_audit_adapter(tmp_path):
+def test_async_audit_adapter(tmp_path):
     """Verify AsyncAuditAdapter offloads writes asynchronously."""
-    log_file = tmp_path / "async_audit.jsonl"
-    sync_logger = AuditLogger(log_path=log_file)
-    async_adapter = AsyncAuditAdapter(sync_logger)
+    import asyncio
+    async def _test():
+        log_file = tmp_path / "async_audit.jsonl"
+        sync_logger = AuditLogger(log_path=log_file)
+        async_adapter = AsyncAuditAdapter(sync_logger)
 
-    rec = await async_adapter.log_event(
-        event_type=EventType.MODEL_CALL,
-        request_id="req-async-1",
-        payload={"model": "qwen2.5-coder"},
-    )
+        rec = await async_adapter.log_event(
+            event_type=EventType.MODEL_CALL,
+            request_id="req-async-1",
+            payload={"model": "qwen2.5-coder"},
+        )
 
-    assert rec.event_type == EventType.MODEL_CALL
-    assert rec.request_id == "req-async-1"
-    valid, errors = sync_logger.verify_chain()
-    assert valid is True
+        assert rec.event_type == EventType.MODEL_CALL
+        assert rec.request_id == "req-async-1"
+        valid, errors = sync_logger.verify_chain()
+        assert valid is True
+    asyncio.run(_test())

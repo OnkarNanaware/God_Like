@@ -174,14 +174,23 @@ class CodeSandboxTool(BaseTool):
                 },
             )
 
+        # Signal failure when the script exited non-zero so the orchestrator's
+        # replan loop can correct runtime errors (ZeroDivisionError, NameError,
+        # SyntaxError, etc.) — not only timeouts.
+        execution_success = (exit_code == 0)
         return ToolResult(
-            success=True,  # Tool ran; orchestrator interprets exit_code
+            success=execution_success,
             output={
                 "stdout": stdout_text,
                 "stderr": stderr_text,
                 "exit_code": exit_code,
                 "timed_out": False,
             },
+            error=(
+                f"Code exited with code {exit_code}. "
+                f"stderr: {stderr_text[:400]}"
+                if not execution_success else None
+            ),
             metadata={
                 "code_hash": code_hash,
                 "exit_code": exit_code,

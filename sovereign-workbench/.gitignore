@@ -34,3 +34,15 @@ dist/
 build/
 *.egg-info/
 outputs/generated/
+
+# Qdrant standalone server binary and its storage (local dev only)
+qdrant_server/
+
+# Qdrant Web UI static files (downloaded locally, not part of source)
+static/
+
+# Qdrant init marker
+.qdrant-initialized
+
+# Node modules
+saraai/node_modules/

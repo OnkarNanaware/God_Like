@@ -23,7 +23,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -685,6 +685,167 @@ async def ingest_document(request: IngestRequest) -> IngestResponse:
     )
 
 
+@app.post("/ingest/upload", tags=["RAG"], response_model=IngestResponse)
+async def ingest_upload_file(
+    file: UploadFile = File(...),
+    collection: str = Form(default="sovereign_knowledge_base"),
+) -> IngestResponse:
+    """
+    Ingest an uploaded file directly into the local Qdrant vector store.
+    Saves the file to uploads/ and chunks, embeds, and indexes it into Qdrant.
+    """
+    if _ingestor is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error": "rag_not_ready", "message": "RAG pipeline not initialised."},
+        )
+
+    uploads_dir = Path(__file__).resolve().parent.parent / "uploads"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+
+    dest_path = uploads_dir / file.filename
+    content = await file.read()
+    dest_path.write_bytes(content)
+
+    request_id = str(uuid.uuid4())
+    try:
+        result = await _ingestor.ingest(
+            source_path=dest_path,
+            collection=collection,
+            request_id=request_id,
+        )
+    except Exception as exc:
+        _get_audit_logger().log_error(
+            request_id=request_id,
+            error_type=type(exc).__name__,
+            message=str(exc),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "ingestion_error", "message": str(exc), "request_id": request_id},
+        )
+
+    return IngestResponse(
+        request_id=result.request_id,
+        source_path=result.source_path,
+        collection=result.collection,
+        chunks_ingested=result.chunks_ingested,
+        source_sha256=result.source_sha256,
+        duration_ms=result.duration_ms,
+    )
+
+
+@app.get("/kb/documents", tags=["RAG"])
+async def list_kb_documents(collection: str = "sovereign_knowledge_base") -> dict[str, Any]:
+    """
+    List all documents directly from the knowledge_base/ directory, uploads/ directory,
+    and Qdrant vector collection. Zero synthetic placeholders.
+    """
+    docs_map: dict[str, dict[str, Any]] = {}
+    project_root = Path(__file__).resolve().parent.parent
+    kb_root = project_root / "knowledge_base"
+    uploads_root = project_root / "uploads"
+
+    # 1. Scan real directories inside knowledge_base/
+    if kb_root.exists() and kb_root.is_dir():
+        for category_dir in sorted(kb_root.iterdir()):
+            if category_dir.is_dir():
+                cat_name = category_dir.name.replace("_", " ").title()
+                for file_path in sorted(category_dir.iterdir()):
+                    if file_path.is_file() and not file_path.name.startswith("."):
+                        docs_map[file_path.name] = {
+                            "name": file_path.name,
+                            "category": cat_name,
+                            "raw_category": category_dir.name,
+                            "chunks": 0,
+                            "status": "READY_TO_INDEX",
+                            "source": str(file_path),
+                            "size_bytes": file_path.stat().st_size,
+                        }
+
+    # 2. Scan uploads/
+    if uploads_root.exists() and uploads_root.is_dir():
+        for file_path in sorted(uploads_root.iterdir()):
+            if file_path.is_file() and not file_path.name.startswith("."):
+                docs_map[file_path.name] = {
+                    "name": file_path.name,
+                    "category": "User Uploads",
+                    "raw_category": "uploads",
+                    "chunks": 0,
+                    "status": "READY_TO_INDEX",
+                    "source": str(file_path),
+                    "size_bytes": file_path.stat().st_size,
+                }
+
+    # 3. Match against Qdrant stored points
+    if _vector_store is not None:
+        try:
+            points, _ = _vector_store._client.scroll(
+                collection_name=collection,
+                limit=1000,
+                with_payload=True,
+                with_vectors=False,
+            )
+            for p in points:
+                payload = p.payload or {}
+                doc_name = payload.get("doc_name") or Path(payload.get("source", "untitled")).name
+                raw_category = payload.get("source_category") or "uploads"
+                cat_name = raw_category.replace("_", " ").title()
+                if doc_name not in docs_map:
+                    docs_map[doc_name] = {
+                        "name": doc_name,
+                        "category": cat_name,
+                        "raw_category": raw_category,
+                        "chunks": 1,
+                        "status": "INGESTED",
+                        "source": payload.get("source", ""),
+                        "preview": (payload.get("text") or "")[:140],
+                    }
+                else:
+                    docs_map[doc_name]["chunks"] = docs_map[doc_name].get("chunks", 0) + 1
+                    docs_map[doc_name]["status"] = "INGESTED"
+                    if "preview" not in docs_map[doc_name] and payload.get("text"):
+                        docs_map[doc_name]["preview"] = payload["text"][:140]
+        except Exception as exc:
+            _log.warning("Could not scroll Qdrant collection '%s': %s", collection, exc)
+
+    return {"documents": list(docs_map.values())}
+
+
+@app.post("/kb/ingest_local", tags=["RAG"])
+async def ingest_local_file(
+    filename: str = Form(...),
+    collection: str = Form(default="sovereign_knowledge_base"),
+) -> IngestResponse:
+    """
+    Ingest an existing local document from knowledge_base/ or uploads/ into Qdrant.
+    """
+    if _ingestor is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error": "rag_not_ready", "message": "RAG pipeline not initialised."},
+        )
+    project_root = Path(__file__).resolve().parent.parent
+    target_path = None
+    for p in project_root.rglob(filename):
+        if p.is_file() and ("knowledge_base" in str(p) or "uploads" in str(p)):
+            target_path = p
+            break
+    if not target_path or not target_path.exists():
+        raise HTTPException(status_code=404, detail=f"File '{filename}' not found.")
+
+    request_id = str(uuid.uuid4())
+    result = await _ingestor.ingest(source_path=target_path, collection=collection, request_id=request_id)
+    return IngestResponse(
+        request_id=result.request_id,
+        source_path=result.source_path,
+        collection=result.collection,
+        chunks_ingested=result.chunks_ingested,
+        source_sha256=result.source_sha256,
+        duration_ms=result.duration_ms,
+    )
+
+
 @app.post("/rag/search", tags=["RAG"], response_model=RagSearchResponse)
 async def rag_search(request: RagSearchRequest) -> RagSearchResponse:
     """
@@ -748,6 +909,111 @@ async def rag_search(request: RagSearchRequest) -> RagSearchResponse:
             for r in results
         ],
     )
+
+
+@app.get("/rag/chunks", tags=["RAG"])
+async def get_rag_chunks(
+    doc_name: Optional[str] = None,
+    collection: str = "sovereign_knowledge_base",
+    limit: int = 100,
+) -> dict[str, Any]:
+    """
+    Retrieve and inspect the actual chunks stored in the Qdrant vector database.
+    Filter by `doc_name` or retrieve all points for a collection.
+    """
+    if _vector_store is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error": "rag_not_ready", "message": "Vector store not initialised."},
+        )
+
+    try:
+        points, _ = _vector_store._client.scroll(
+            collection_name=collection,
+            limit=1000,
+            with_payload=True,
+            with_vectors=False,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "qdrant_error", "message": str(exc)},
+        )
+
+    matching_chunks = []
+    for p in points:
+        payload = p.payload or {}
+        p_doc_name = payload.get("doc_name") or Path(payload.get("source", "")).name
+        if doc_name and doc_name.lower() not in p_doc_name.lower() and doc_name.lower() not in payload.get("source", "").lower():
+            continue
+
+        matching_chunks.append({
+            "chunk_id": str(p.id),
+            "doc_name": p_doc_name,
+            "chunk_index": payload.get("chunk_index", 0),
+            "page_number": payload.get("page_number", 1),
+            "character_count": len(payload.get("text", "")),
+            "text": payload.get("text", ""),
+            "source": payload.get("source", ""),
+            "source_category": payload.get("source_category", ""),
+            "source_sha256": payload.get("source_sha256", ""),
+            "ingested_at": payload.get("timestamp", ""),
+        })
+
+    # Sort chunks by doc_name and chunk_index
+    matching_chunks.sort(key=lambda c: (c["doc_name"], c["chunk_index"]))
+
+    return {
+        "collection": collection,
+        "filter_doc_name": doc_name,
+        "total_matched": len(matching_chunks),
+        "chunks": matching_chunks[:limit],
+    }
+
+
+@app.get("/rag/stats", tags=["RAG"])
+async def get_rag_stats() -> dict[str, Any]:
+    """
+    Return summary statistics of all collections and indexed documents in Qdrant.
+    """
+    if _vector_store is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error": "rag_not_ready", "message": "Vector store not initialised."},
+        )
+
+    try:
+        collections_info = _vector_store._client.get_collections().collections
+        stats: dict[str, Any] = {"collections": []}
+
+        for col in collections_info:
+            col_name = col.name
+            count_info = _vector_store._client.count(collection_name=col_name)
+            points, _ = _vector_store._client.scroll(
+                collection_name=col_name,
+                limit=1000,
+                with_payload=True,
+                with_vectors=False,
+            )
+            doc_counts: dict[str, int] = {}
+            for p in points:
+                payload = p.payload or {}
+                doc = payload.get("doc_name") or Path(payload.get("source", "untitled")).name
+                doc_counts[doc] = doc_counts.get(doc, 0) + 1
+
+            stats["collections"].append({
+                "name": col_name,
+                "total_vectors": count_info.count,
+                "indexed_documents_count": len(doc_counts),
+                "document_breakdown": doc_counts,
+            })
+
+        return stats
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "qdrant_error", "message": str(exc)},
+        )
 
 
 # ---------------------------------------------------------------------------
