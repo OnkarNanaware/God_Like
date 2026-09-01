@@ -147,7 +147,9 @@ class ArtifactManager:
         self._storage_dir.mkdir(parents=True, exist_ok=True)
         self._registry: dict[str, Artifact] = {}
         self._lock = threading.Lock()
+        self.scan_storage_dir()
         _log.info("ArtifactManager initialised — storage_dir=%s", self._storage_dir)
+
 
     # ------------------------------------------------------------------
     # Public API
@@ -234,9 +236,49 @@ class ArtifactManager:
         return artifact
 
     def get_artifact(self, artifact_id: str) -> Optional[Artifact]:
-        """Return the ``Artifact`` for *artifact_id*, or ``None`` if not found."""
+        """
+        Return the ``Artifact`` for *artifact_id*, or ``None`` if not found.
+
+        Checks the in-memory registry first. If not found, checks the filesystem
+        for an existing ``{artifact_id}_*`` deliverable so that files survive
+        server restarts and process boundaries.
+        """
         with self._lock:
-            return self._registry.get(artifact_id)
+            art = self._registry.get(artifact_id)
+            if art is not None:
+                return art
+
+        # Disk recovery fallback: look for {artifact_id}_* in storage_dir
+        try:
+            matches = list(self._storage_dir.glob(f"{artifact_id}_*"))
+            if matches:
+                path = matches[0]
+                if path.is_file() and path.stat().st_size > 0:
+                    ext = path.suffix.lower()
+                    if ext in ALLOWED_EXTENSIONS:
+                        filename = path.name[len(artifact_id) + 1:]
+                        mime = MIME_TYPES.get(ext, "application/octet-stream")
+                        atype = ext.lstrip(".")
+                        recovered = Artifact(
+                            artifact_id=artifact_id,
+                            filename=filename,
+                            artifact_type=atype,
+                            mime_type=mime,
+                            physical_path=path,
+                            size_bytes=path.stat().st_size,
+                            request_id=None,
+                            created_at=datetime.fromtimestamp(
+                                path.stat().st_ctime, tz=timezone.utc
+                            ).isoformat(),
+                        )
+                        with self._lock:
+                            self._registry[artifact_id] = recovered
+                        _log.info("Recovered artifact from disk: id=%s name=%s", artifact_id, filename)
+                        return recovered
+        except Exception as exc:
+            _log.warning("Disk fallback failed for artifact %s: %s", artifact_id, exc)
+
+        return None
 
     def list_artifacts(self, request_id: Optional[str] = None) -> list[Artifact]:
         """
@@ -280,15 +322,47 @@ class ArtifactManager:
     def scan_storage_dir(self) -> int:
         """
         Scan ``storage_dir`` to rebuild the in-process registry from existing
-        files on disk.  Useful after a server restart to re-serve previously
+        files on disk. Useful after a server restart to re-serve previously
         generated artifacts.
-
-        .. note::
-            Not yet implemented.  Reserved for a future persistence phase.
-            Returns 0 unconditionally until implemented.
         """
-        _log.debug("scan_storage_dir called — not implemented yet")
-        return 0
+        count = 0
+        try:
+            for path in self._storage_dir.iterdir():
+                if not path.is_file():
+                    continue
+                parts = path.name.split("_", 1)
+                if (
+                    len(parts) == 2
+                    and len(parts[0]) == 32
+                    and all(c in "0123456789abcdef" for c in parts[0])
+                ):
+                    art_id = parts[0]
+                    ext = path.suffix.lower()
+                    if ext in ALLOWED_EXTENSIONS:
+                        size = path.stat().st_size
+                        if size > 0:
+                            art = Artifact(
+                                artifact_id=art_id,
+                                filename=parts[1],
+                                artifact_type=ext.lstrip("."),
+                                mime_type=MIME_TYPES.get(ext, "application/octet-stream"),
+                                physical_path=path,
+                                size_bytes=size,
+                                request_id=None,
+                                created_at=datetime.fromtimestamp(
+                                    path.stat().st_ctime, tz=timezone.utc
+                               ).isoformat(),
+                            )
+                            with self._lock:
+                                if art_id not in self._registry:
+                                    self._registry[art_id] = art
+                                    count += 1
+            if count > 0:
+                _log.info("scan_storage_dir indexed %d artifacts from disk", count)
+        except Exception as exc:
+            _log.warning("Error scanning storage directory: %s", exc)
+        return count
+
 
     # ------------------------------------------------------------------
     # Internal helpers
