@@ -269,6 +269,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             orchestrator=_orchestrator,
             startup_resolved=resolved,
             startup_gpu_info=_startup_gpu_info,
+            vector_store=_vector_store,
         )
         _log.info("Orchestrator initialised and Phase E router wired.")
     except Exception as exc:  # noqa: BLE001
@@ -383,7 +384,7 @@ class IngestRequest(BaseModel):
         description="Absolute (or cwd-relative) path to the file to ingest.",
     )
     collection: str = Field(
-        default="docs",
+        default="sovereign_knowledge_base",
         description="Target Qdrant collection name (caller-controlled namespace).",
     )
     request_id: Optional[str] = Field(default=None, description="Audit correlation ID.")
