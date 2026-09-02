@@ -49,6 +49,28 @@ export async function forceTier(tier) {
   return res.json()
 }
 
+/**
+ * Override a single modality slot with a specific model.
+ *
+ * @param {string} modality   - 'text' | 'code' | 'vision' | 'embedding'
+ * @param {string} modelName  - Registry key (model_name field from available_models)
+ * Returns { applied_modality, applied_model, resolved_models, manual_overrides, vram_note }
+ */
+export async function forceModel(modality, modelName) {
+  const body = new FormData()
+  body.append('modality', modality)
+  body.append('model_name', modelName)
+  const res = await fetch(`${BACKEND_URL}/hardware/force_model`, {
+    method: 'POST',
+    body,
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err?.detail?.message || `force_model returned ${res.status}`)
+  }
+  return res.json()
+}
+
 // ---------------------------------------------------------------------------
 // Orchestrator: submit + stream
 // ---------------------------------------------------------------------------

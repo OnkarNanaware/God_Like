@@ -120,6 +120,13 @@ Phrases that are NOT generation requests — answer in chat only, NO generation 
   "what are the recommendations", "analyse this spreadsheet", "what does X mean",
   or any question whose answer fits naturally in a text response
 
+AMBIGUITY RULE:
+If the user's request is not unambiguously asking for a file or document as output
+(e.g., the phrasing is ambiguous, or the goal is equally a chat/analysis task),
+do NOT include any generation tool in the plan. Default to answering in chat only.
+Only include a generation tool (generate_docx, generate_pptx, generate_xlsx) when
+the user is unambiguously asking for a file as a deliverable.
+
 GENERAL KNOWLEDGE RULE:
 Return an EMPTY array [] ONLY for trivial greetings (e.g. "hello"), basic math (e.g. "what is 2+2"), or pure general chat that has no relation to any system, architecture, report, or technical topic.
 

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { fetchHardwareStatus, forceTier } from '../hooks/useBackend'
+import { fetchHardwareStatus, forceTier, forceModel } from '../hooks/useBackend'
 
 const TIER_COLORS = {
   large: '#a78bfa',
@@ -32,6 +32,8 @@ export default function GpuStatusPanel({ onReady }) {
   const [devOpen, setDevOpen] = useState(false)
   const [forcingTier, setForcingTier] = useState(false)
   const [vramNote, setVramNote] = useState(null)   // Fix #5: post-switch note
+
+  const [forcingModel, setForcingModel] = useState(null)
 
   const loadStatus = useCallback(async () => {
     try {
@@ -66,6 +68,20 @@ export default function GpuStatusPanel({ onReady }) {
       setError(`Force-tier failed: ${err.message}`)
     } finally {
       setForcingTier(false)
+    }
+  }
+
+  async function handleForceModel(modality, modelName) {
+    setForcingModel(modality)
+    try {
+      const result = await forceModel(modality, modelName)
+      setVramNote(result.vram_note || 'Model override applied.')
+      setTimeout(() => setVramNote(null), 6000)
+      await loadStatus()
+    } catch (err) {
+      setError(`Force-model failed: ${err.message}`)
+    } finally {
+      setForcingModel(null)
     }
   }
 
@@ -106,6 +122,7 @@ export default function GpuStatusPanel({ onReady }) {
 
   const degraded = status.degraded
   const models = status.resolved_models || []
+  const availableModels = status.available_models || {}
   const gpuInfo = status.gpu_info || {}
   const activeTier = status.force_tier || 'auto'
 
@@ -159,7 +176,7 @@ export default function GpuStatusPanel({ onReady }) {
           top: 'calc(100% + 6px)',
           left: 0,
           zIndex: 200,
-          minWidth: 340,
+          minWidth: 380,
           backgroundColor: '#0d101a',
           background: '#0d101a',
           border: '1px solid rgba(255, 255, 255, 0.12)',
@@ -190,35 +207,81 @@ export default function GpuStatusPanel({ onReady }) {
             )}
           </div>
 
-          {/* Per-slot model table */}
+          {/* Per-slot model table with dropdowns */}
           <div style={{ marginBottom: 10 }}>
-            <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--text-highlight)', marginBottom: 6 }}>
-              🧠 Active Models
-            </div>
-            {models.map(m => (
-              <div key={m.modality} style={{
-                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                padding: '4px 0',
-                borderBottom: '1px solid rgba(255,255,255,0.04)',
-                fontSize: 12,
-              }}>
-                <span style={{ color: 'var(--text-dim)', minWidth: 80 }}>
-                  {MODALITY_LABELS[m.modality] || m.modality}
-                </span>
-                <span style={{ color: 'var(--text-muted)', flex: 1, paddingLeft: 8, fontFamily: 'var(--font-mono)', fontSize: 11 }}>
-                  {m.ollama_tag}
-                </span>
-                <span style={{
-                  fontSize: 10, fontWeight: 700,
-                  color: TIER_COLORS[m.tier] || TIER_COLORS.default,
-                  background: `${TIER_COLORS[m.tier] || TIER_COLORS.default}18`,
-                  border: `1px solid ${TIER_COLORS[m.tier] || TIER_COLORS.default}40`,
-                  borderRadius: 4, padding: '2px 6px',
-                }}>
-                  {m.tier?.toUpperCase()}
-                </span>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+              <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--text-highlight)' }}>
+                🧠 Active Models
               </div>
-            ))}
+              <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>Auto-detected / Selectable</span>
+            </div>
+            {models.map(m => {
+              const options = availableModels[m.modality] || []
+              const hasChoices = options.length > 1
+              const isModalityBusy = forcingModel === m.modality
+
+              return (
+                <div key={m.modality} style={{
+                  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                  padding: '6px 0',
+                  borderBottom: '1px solid rgba(255,255,255,0.04)',
+                  fontSize: 12,
+                  gap: 8,
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 80 }}>
+                    <span style={{ color: 'var(--text-dim)' }}>
+                      {MODALITY_LABELS[m.modality] || m.modality}
+                    </span>
+                    {m.manual && (
+                      <span title="Manually pinned" style={{ fontSize: 10, color: '#fbbf24' }}>⚡</span>
+                    )}
+                  </div>
+
+                  <div style={{ flex: 1 }}>
+                    {hasChoices ? (
+                      <select
+                        value={m.model_name}
+                        disabled={isModalityBusy || forcingTier}
+                        onChange={(e) => handleForceModel(m.modality, e.target.value)}
+                        style={{
+                          width: '100%',
+                          background: 'rgba(255, 255, 255, 0.06)',
+                          border: m.manual ? '1px solid rgba(251, 191, 36, 0.4)' : '1px solid rgba(255, 255, 255, 0.12)',
+                          borderRadius: 6,
+                          color: '#e2e8f0',
+                          padding: '3px 6px',
+                          fontSize: 11,
+                          fontFamily: 'var(--font-mono)',
+                          cursor: 'pointer',
+                          outline: 'none',
+                        }}
+                      >
+                        {options.map((opt) => (
+                          <option key={opt.model_name} value={opt.model_name} style={{ background: '#0d101a', color: '#fff' }}>
+                            {opt.ollama_tag} ({opt.tier.toUpperCase()})
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <span style={{ color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+                        {m.ollama_tag}
+                      </span>
+                    )}
+                  </div>
+
+                  <span style={{
+                    fontSize: 10, fontWeight: 700,
+                    color: TIER_COLORS[m.tier] || TIER_COLORS.default,
+                    background: `${TIER_COLORS[m.tier] || TIER_COLORS.default}18`,
+                    border: `1px solid ${TIER_COLORS[m.tier] || TIER_COLORS.default}40`,
+                    borderRadius: 4, padding: '2px 6px',
+                    minWidth: 44, textAlign: 'center',
+                  }}>
+                    {isModalityBusy ? '...' : m.tier?.toUpperCase()}
+                  </span>
+                </div>
+              )
+            })}
           </div>
 
           {/* VRAM eviction note (Fix #5) */}

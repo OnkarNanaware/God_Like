@@ -97,6 +97,9 @@ _startup_resolved: dict = {}  # {modality: model_name} — updated by force_tier
 _startup_gpu_info: dict = {}  # GPU detection result — updated by force_tier
 _vector_store = None          # VectorStore singleton (for KB-awareness in planning)
 _router = None                # Router singleton (for dynamic model selection)
+_model_overrides: dict = {}   # {modality: model_name} — manually overridden slots
+                               # Set by POST /hardware/force_model.
+                               # Cleared by POST /hardware/force_tier (bulk tier reset).
 
 
 def setup_orchestrator_router(
@@ -252,9 +255,39 @@ def _validate_artifact_id(artifact_id: str) -> None:
         )
 
 
+def _available_models_by_modality() -> dict[str, list[dict]]:
+    """
+    Return every registered model grouped by modality, enriched with
+    tier/VRAM metadata.  Used by ``GET /hardware/status`` to populate
+    per-slot dropdowns in the UI.
+
+    Returns
+    -------
+    ``{modality: [{model_name, ollama_tag, tier, est_vram_mb}]}``
+    """
+    from app.models.ollama_client import MODEL_REGISTRY
+
+    groups: dict[str, list[dict]] = {}
+    for model_name, entry in MODEL_REGISTRY.items():
+        modality = entry.get("modality", "unknown")
+        groups.setdefault(modality, []).append({
+            "model_name": model_name,
+            "ollama_tag": entry.get("ollama_tag", model_name),
+            "tier": entry.get("tier", "unknown"),
+            "est_vram_mb": entry.get("est_vram_mb", 0),
+        })
+    # Sort each group smallest→largest so the UI lists lite options first.
+    for modality in groups:
+        groups[modality].sort(key=lambda e: e["est_vram_mb"])
+    return groups
+
+
 def _enrich_resolved_models(resolved: dict) -> list[dict]:
     """
-    Convert {modality: model_name} → [{modality, model_name, ollama_tag, tier, est_vram_mb}].
+    Convert {modality: model_name} → [{modality, model_name, ollama_tag, tier, est_vram_mb, manual}].
+
+    The ``manual`` flag is True when the slot was set via
+    ``POST /hardware/force_model`` (not auto-detected or bulk-tier-switched).
     """
     from app.models.ollama_client import MODEL_REGISTRY
 
@@ -268,6 +301,7 @@ def _enrich_resolved_models(resolved: dict) -> list[dict]:
                 "ollama_tag": entry.get("ollama_tag", model_name),
                 "tier": entry.get("tier", "unknown"),
                 "est_vram_mb": entry.get("est_vram_mb", 0),
+                "manual": modality in _model_overrides,
             }
         )
     return result
@@ -282,11 +316,19 @@ def _enrich_resolved_models(resolved: dict) -> list[dict]:
 async def hardware_status() -> dict:
     """
     Return detected VRAM, per-slot resolved tier, and the currently active
-    model tag for each capability slot.
+    model tag for each capability slot, plus the full list of available models
+    per modality (for populating per-slot dropdowns in the UI).
 
-    This is what the UI's GPU panel reads on load and after a force-tier
-    switch.  Always returns a coherent response — degraded state (CPU, no GPU)
-    is surfaced explicitly, not hidden behind a generic "ready."
+    Response shape
+    --------------
+    {
+        "gpu_info":         {...},
+        "force_tier":       str | null,
+        "resolved_models":  [{modality, model_name, ollama_tag, tier, est_vram_mb, manual}],
+        "available_models": {modality: [{model_name, ollama_tag, tier, est_vram_mb}]},
+        "manual_overrides": {modality: model_name},   # currently pinned slots
+        "degraded":         bool,
+    }
     """
     if _async_audit is not None:
         await _async_audit.log_event(
@@ -296,10 +338,12 @@ async def hardware_status() -> dict:
         )
 
     return {
-        "gpu_info": _startup_gpu_info,
-        "force_tier": _force_tier_override,
-        "resolved_models": _enrich_resolved_models(_startup_resolved),
-        "degraded": not _startup_gpu_info.get("gpu_available", False),
+        "gpu_info":         _startup_gpu_info,
+        "force_tier":       _force_tier_override,
+        "resolved_models":  _enrich_resolved_models(_startup_resolved),
+        "available_models": _available_models_by_modality(),
+        "manual_overrides": dict(_model_overrides),
+        "degraded":         not _startup_gpu_info.get("gpu_available", False),
     }
 
 
@@ -343,6 +387,10 @@ async def force_tier(tier: str = Form(...)) -> dict:
         # display dict; the actual OllamaClient objects held by _orchestrator,
         # VisionExtractTool, and _router must be swapped here too.
         _apply_resolved_to_singletons(new_resolved)
+
+        # Bulk tier switch clears per-slot manual overrides — the new tier
+        # is now the authoritative selection for all slots.
+        _model_overrides.clear()
     except Exception as exc:
         _log.warning("force_tier re-resolve failed: %s", exc)
         raise HTTPException(
@@ -365,6 +413,110 @@ async def force_tier(tier: str = Form(...)) -> dict:
             "Tier switch applied. Ollama may take a moment to unload the "
             "previous model from VRAM before the new model is fully active."
         ) if clean else "Auto-detection restored.",
+    }
+
+
+@router.post("/hardware/force_model", tags=["Hardware"])
+async def force_model(
+    modality: str = Form(..., description="Modality slot: text | code | vision | embedding"),
+    model_name: str = Form(..., description="Registry key of the model to activate for this slot"),
+) -> dict:
+    """
+    Override a single modality slot with a specific model.
+
+    Unlike ``force_tier`` (which re-resolves ALL slots via the tier resolver),
+    this endpoint pins exactly one slot while leaving the others unchanged.
+    The pin is tracked in ``_model_overrides`` and surfaced in the UI as a ⚡ badge.
+
+    Calling ``POST /hardware/force_tier`` (including AUTO reset) clears all pins.
+
+    Valid modalities: ``text``, ``code``, ``vision``, ``embedding``.
+    ``model_name`` must be a key in ``MODEL_REGISTRY`` with the matching modality.
+    """
+    global _startup_resolved, _model_overrides
+
+    from app.models.ollama_client import MODEL_REGISTRY
+
+    # ── Validate ──────────────────────────────────────────────────────
+    clean_modality = modality.strip().lower()
+    clean_model = model_name.strip()
+
+    valid_modalities = {"text", "code", "vision", "embedding"}
+    if clean_modality not in valid_modalities:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error": "invalid_modality",
+                "message": f"modality must be one of {sorted(valid_modalities)}, got {clean_modality!r}",
+            },
+        )
+
+    if clean_model not in MODEL_REGISTRY:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error": "unknown_model",
+                "message": (
+                    f"model_name {clean_model!r} is not in MODEL_REGISTRY. "
+                    f"Known models: {sorted(MODEL_REGISTRY)}"
+                ),
+            },
+        )
+
+    entry = MODEL_REGISTRY[clean_model]
+    if entry.get("modality") != clean_modality:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error": "modality_mismatch",
+                "message": (
+                    f"Model {clean_model!r} has modality={entry.get('modality')!r}, "
+                    f"not {clean_modality!r}. Choose a model registered for this slot."
+                ),
+            },
+        )
+
+    # ── Apply ─────────────────────────────────────────────────────────
+    _startup_resolved[clean_modality] = clean_model
+    _model_overrides[clean_modality] = clean_model
+
+    _log.info(
+        "[MODEL OVERRIDE] modality=%s → %s (%s)",
+        clean_modality,
+        clean_model,
+        entry.get("ollama_tag"),
+    )
+
+    try:
+        _apply_resolved_to_singletons(_startup_resolved)
+    except Exception as exc:
+        _log.warning("[MODEL OVERRIDE] singleton swap failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "swap_failed", "message": str(exc)},
+        )
+
+    if _async_audit is not None:
+        from app.audit.logger import EventType
+        await _async_audit.log_event(
+            EventType.AGENT_ACTION,
+            request_id="SYSTEM_FORCE_MODEL",
+            payload={
+                "action": "force_model_applied",
+                "modality": clean_modality,
+                "model_name": clean_model,
+                "ollama_tag": entry.get("ollama_tag"),
+            },
+        )
+
+    return {
+        "applied_modality": clean_modality,
+        "applied_model": clean_model,
+        "resolved_models": _enrich_resolved_models(_startup_resolved),
+        "manual_overrides": dict(_model_overrides),
+        "vram_note": (
+            "Model override applied. Ollama may take a moment to load the new model into VRAM."
+        ),
     }
 
 
