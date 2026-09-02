@@ -134,6 +134,17 @@ If the goal asks about ANY project, system architecture, internal knowledge, con
 You MUST call 'rag_search' with tool_args: {{"query": "<concise search query>"}}.
 Always search the internal knowledge base for domain, project, or document questions to retrieve grounded context.
 
+BUDGET / APPROVAL NOTE RULE — READ CAREFULLY:
+When the user uploads a spreadsheet (.xlsx, .xls, .csv) and requests an approval note
+or similar financial document:
+1. Call analyze_spreadsheet first (file_path = the uploaded file's absolute path).
+2. Call generate_docx with document_type="approval_note" AND pass
+   source_spreadsheet_path = <same uploaded file path>.
+   The tool will read the spreadsheet and auto-populate the financial rows and total.
+   Do NOT hard-code financial_rows as an empty list [].
+   Do NOT invent line items or amounts.
+   Pass approval_data with the non-financial fields only (date, to, from_, subject, etc.).
+
 CRITICAL RULES — violating any of these will cause the agent to fail:
 - Output only the JSON array. No prose, no markdown fences, no code blocks.
 - You MUST use only tool names that appear EXACTLY in the available tools list above.

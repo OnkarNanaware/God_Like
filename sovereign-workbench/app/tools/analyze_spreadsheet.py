@@ -35,6 +35,10 @@ ToolResult.output   : {
             "row_count": int,
             "col_count": int,
             "headers": [str, ...],
+            "rows": [                        # NEW: actual data rows (up to 100)
+                {"<header>": <value>, ...},  #      list of header→value dicts
+                ...
+            ],
             "numeric_stats": {
                 "<col_header>": {"min": float, "max": float, "mean": float},
                 ...
@@ -71,13 +75,16 @@ from app.tools.base import BaseTool, ToolResult
 _log = logging.getLogger("sovereign.tools.analyze_spreadsheet")
 
 _SUMMARY_SYSTEM_PROMPT = """\
-You are a data analyst assistant. Given a structured extract of a spreadsheet file,
-produce a concise 2–4 sentence natural-language summary that describes:
+You are a data analyst assistant. Given a structured extract of a spreadsheet file
+(including actual row data and numeric statistics), produce a concise 2–4 sentence
+natural-language summary that describes:
 - What the spreadsheet appears to contain (subject matter / domain)
 - How many sheets and rows of data it has
+- Key line items, totals, or amounts visible in the row data
 - Any notable patterns, ranges, or outliers visible in the numeric stats
 
-Be factual and specific. Do not invent data not present in the extract.\
+Be factual and specific. Mention actual values from the rows where relevant.
+Do not invent data not present in the extract.\
 """
 
 
@@ -210,8 +217,18 @@ class AnalyzeSpreadsheetTool(BaseTool):
     # Extraction — xlsx / xls
     # ------------------------------------------------------------------
 
+    # Maximum rows included in the structured extract (per sheet).
+    # Enough for any real budget/report sheet; prevents huge payloads.
+    _MAX_ROWS = 100
+
     def _extract_xlsx(self, path: Path) -> list[dict[str, Any]]:
-        """Extract structure from an .xlsx/.xls file using openpyxl."""
+        """Extract structure from an .xlsx/.xls file using openpyxl.
+
+        Each sheet dict now includes a ``rows`` key containing up to
+        ``_MAX_ROWS`` data rows as list-of-dicts ({header: value}).  This
+        is the fix for Bug A: previously only aggregated stats were included
+        and actual line-item data was silently discarded.
+        """
         import openpyxl
 
         wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
@@ -226,6 +243,7 @@ class AnalyzeSpreadsheetTool(BaseTool):
                     "row_count": 0,
                     "col_count": 0,
                     "headers": [],
+                    "rows": [],
                     "numeric_stats": {},
                 })
                 continue
@@ -240,11 +258,30 @@ class AnalyzeSpreadsheetTool(BaseTool):
             col_count = len(headers)
             numeric_stats = _compute_numeric_stats(headers, data_rows)
 
+            # ── NEW: include actual row data (up to _MAX_ROWS) ──────────
+            # Convert each row to a {header: value} dict.  None cells are
+            # preserved as None so the LLM can distinguish missing values.
+            sampled_rows: list[dict[str, Any]] = []
+            for raw_row in data_rows[:self._MAX_ROWS]:
+                row_dict = {}
+                for i, header in enumerate(headers):
+                    cell_val = raw_row[i] if i < len(raw_row) else None
+                    row_dict[header] = cell_val
+                sampled_rows.append(row_dict)
+
+            _log.info(
+                "[SPREADSHEET EXTRACT] sheet=%r  rows=%d  cols=%d  sampled=%d  "
+                "first_row=%s",
+                sheet_name, row_count, col_count, len(sampled_rows),
+                sampled_rows[0] if sampled_rows else "(empty)",
+            )
+
             sheets.append({
                 "name": sheet_name,
                 "row_count": row_count,
                 "col_count": col_count,
                 "headers": headers,
+                "rows": sampled_rows,          # ← NEW: actual line-item data
                 "numeric_stats": numeric_stats,
             })
 
@@ -256,7 +293,11 @@ class AnalyzeSpreadsheetTool(BaseTool):
     # ------------------------------------------------------------------
 
     def _extract_csv(self, path: Path) -> list[dict[str, Any]]:
-        """Extract structure from a .csv file using stdlib csv module."""
+        """Extract structure from a .csv file using stdlib csv module.
+
+        Includes ``rows`` key (up to ``_MAX_ROWS``) for the same reason as
+        ``_extract_xlsx`` — so downstream steps see actual cell values.
+        """
         rows: list[tuple] = []
         try:
             with path.open(newline="", encoding="utf-8-sig") as fh:
@@ -272,7 +313,7 @@ class AnalyzeSpreadsheetTool(BaseTool):
 
         if not rows:
             return [{"name": path.stem, "row_count": 0, "col_count": 0,
-                     "headers": [], "numeric_stats": {}}]
+                     "headers": [], "rows": [], "numeric_stats": {}}]
 
         raw_headers = rows[0]
         headers = [str(h) if h else f"Col{i+1}" for i, h in enumerate(raw_headers)]
@@ -281,11 +322,26 @@ class AnalyzeSpreadsheetTool(BaseTool):
         col_count = len(headers)
         numeric_stats = _compute_numeric_stats(headers, data_rows)
 
+        # ── NEW: actual row data (up to _MAX_ROWS) ─────────────────────
+        sampled_rows: list[dict[str, Any]] = [
+            {headers[i]: (row[i] if i < len(row) else None)
+             for i in range(len(headers))}
+            for row in data_rows[:self._MAX_ROWS]
+        ]
+
+        _log.info(
+            "[SPREADSHEET EXTRACT] csv=%r  rows=%d  cols=%d  sampled=%d  "
+            "first_row=%s",
+            path.name, row_count, col_count, len(sampled_rows),
+            sampled_rows[0] if sampled_rows else "(empty)",
+        )
+
         return [{
             "name": path.stem,
             "row_count": row_count,
             "col_count": col_count,
             "headers": headers,
+            "rows": sampled_rows,           # ← NEW
             "numeric_stats": numeric_stats,
         }]
 

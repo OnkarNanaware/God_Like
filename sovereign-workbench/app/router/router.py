@@ -121,6 +121,55 @@ class Router:
         self._llm_client = llm_client
         self._default_model_name = default_model_name
         self._registry: dict[str, dict[str, Any]] = MODEL_REGISTRY
+        # Tier-resolved model overrides (None = use static registry preference).
+        # Updated by set_resolved_models() after a force_tier switch.
+        self._resolved_code_model: Optional[str] = None
+        self._resolved_vision_model: Optional[str] = None
+
+    # ------------------------------------------------------------------
+    # Tier-override injection (called by orchestrator_router after force_tier)
+    # ------------------------------------------------------------------
+
+    def set_resolved_models(self, resolved: dict[str, str]) -> None:
+        """
+        Push a new ``{modality: model_name}`` mapping into the router so that
+        subsequent routing decisions respect the active tier.
+
+        Called by ``orchestrator_router._apply_resolved_to_singletons()`` after
+        every ``POST /hardware/force_tier`` request.
+
+        Parameters
+        ----------
+        resolved:
+            The dict returned by ``tier_resolver.resolve_startup_models()``.
+            Keys are modality strings ("text", "code", "vision", "embedding").
+        """
+        old_code = self._resolved_code_model
+        old_vision = self._resolved_vision_model
+
+        new_text = resolved.get("text")
+        new_code = resolved.get("code")
+        new_vision = resolved.get("vision")
+
+        # Update default text model
+        if new_text and new_text in self._registry:
+            self._default_model_name = new_text
+
+        # Update code override
+        self._resolved_code_model = new_code if (new_code and new_code in self._registry) else None
+
+        # Update vision override
+        self._resolved_vision_model = new_vision if (new_vision and new_vision in self._registry) else None
+
+        _log.info(
+            "[TIER SWITCH] Router model overrides updated — "
+            "text=%s, code=%s (was %s), vision=%s (was %s)",
+            self._default_model_name,
+            self._resolved_code_model,
+            old_code,
+            self._resolved_vision_model,
+            old_vision,
+        )
 
     # ------------------------------------------------------------------
     # Public interface
@@ -250,6 +299,14 @@ class Router:
             Capability.REFACTORING.value,
             Capability.COMPLEX_CODE.value,
         }:
+            # Tier-resolved override takes priority (set after force_tier switch).
+            if self._resolved_code_model and self._resolved_code_model in self._registry:
+                _log.debug(
+                    "[ROUTER] Using tier-resolved code model: %s",
+                    self._resolved_code_model,
+                )
+                return self._resolved_code_model
+            # Static preference list (startup default).
             for preferred in _CODE_MODEL_PREFERENCE:
                 if preferred in self._registry:
                     if cap_value in self._registry[preferred].get("capability_tags", []):
@@ -264,6 +321,13 @@ class Router:
             Capability.DOCUMENT_VISION.value,
             Capability.CHART_ANALYSIS.value,
         }:
+            # Tier-resolved override takes priority.
+            if self._resolved_vision_model and self._resolved_vision_model in self._registry:
+                _log.debug(
+                    "[ROUTER] Using tier-resolved vision model: %s",
+                    self._resolved_vision_model,
+                )
+                return self._resolved_vision_model
             for name, cfg in self._registry.items():
                 if cfg.get("modality") == "vision":
                     return name

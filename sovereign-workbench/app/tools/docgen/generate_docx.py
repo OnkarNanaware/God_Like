@@ -132,6 +132,18 @@ class GenerateDocxTool(BaseTool):
                     "approved_by, financial_rows (list), financial_total, initiated_by."
                 ),
             },
+            "source_spreadsheet_path": {
+                "type": "string",
+                "description": (
+                    "Absolute path to the uploaded .xlsx/.xls/.csv file that "
+                    "contains the budget data. When provided alongside "
+                    "document_type='approval_note', the tool reads the spreadsheet "
+                    "and auto-populates financial_rows and financial_total from the "
+                    "actual cell data — so you do NOT need to hard-code values in "
+                    "approval_data.financial_rows. Always pass this when the user "
+                    "uploaded a budget file."
+                ),
+            },
             "output_filename": {
                 "type": "string",
                 "description": "Filename for the generated file, e.g. 'approval_note.docx'.",
@@ -285,7 +297,14 @@ class GenerateDocxTool(BaseTool):
     def _build_approval_note(
         self, path: Path, kwargs: dict[str, Any]
     ) -> tuple[int, int]:
-        """Route to the template-exact approval note builder."""
+        """Route to the template-exact approval note builder.
+
+        Fix (Bug B): when ``source_spreadsheet_path`` is supplied and
+        ``financial_rows`` is empty, the spreadsheet is read here and the
+        financial table is hydrated from actual cell values.  This eliminates
+        the planning-time baking problem where the planner had to hard-code
+        row data it couldn't know until the file was opened.
+        """
         from app.tools.docgen.approval_note import (
             ApprovalNoteData,
             FinancialRow,
@@ -296,6 +315,34 @@ class GenerateDocxTool(BaseTool):
             FinancialRow(**r) if isinstance(r, dict) else r
             for r in (raw.get("financial_rows") or [])
         ]
+
+        # ── Bug B Fix: hydrate financial rows from the spreadsheet ────────
+        # If the planner left financial_rows empty (the common case when the
+        # LLM bakes the plan before seeing the file), and a spreadsheet path
+        # was provided, read the file and build the rows now.
+        source_path: Optional[str] = kwargs.get("source_spreadsheet_path")
+        if not financial_rows and source_path:
+            try:
+                hydrated_rows, computed_total = self._rows_from_spreadsheet(source_path)
+                financial_rows = hydrated_rows
+                # Only override financial_total if the caller didn't supply one
+                if not raw.get("financial_total") and computed_total is not None:
+                    raw = {**raw, "financial_total": computed_total}
+                _log.info(
+                    "[APPROVAL NOTE] Hydrated %d financial rows from spreadsheet: %s "
+                    "(total=%s)",
+                    len(financial_rows),
+                    source_path,
+                    computed_total,
+                )
+            except Exception as exc:
+                _log.warning(
+                    "[APPROVAL NOTE] Could not hydrate rows from %s: %s "
+                    "— leaving financial table blank",
+                    source_path,
+                    exc,
+                )
+
         data = ApprovalNoteData(
             date=raw.get("date", ""),
             to=raw.get("to", ""),
@@ -312,6 +359,114 @@ class GenerateDocxTool(BaseTool):
         )
         build_approval_note(data, path)
         return 5, len(financial_rows)  # 5 numbered sections
+
+    @staticmethod
+    def _rows_from_spreadsheet(
+        file_path: str,
+    ) -> tuple[list, str]:
+        """
+        Read a spreadsheet and return (financial_rows, total_str).
+
+        Strategy
+        --------
+        * Reads the first sheet.
+        * Treats column 0 as the Budget Head label and the last numeric
+          column as the Estimated Cost amount.  This is robust to arbitrary
+          column orderings (e.g. files that have notes columns in between).
+        * Skips rows where both values are empty/None.
+        * Attempts to sum all numeric costs to compute the total.
+        * Returns a list of ``FinancialRow`` dataclass instances.
+
+        Raises
+        ------
+        Exception on any file/parse error; caller logs and falls back to blank.
+        """
+        from pathlib import Path as _Path
+        from app.tools.docgen.approval_note import FinancialRow
+        import openpyxl
+        import csv as _csv
+
+        path = _Path(file_path)
+        ext = path.suffix.lower()
+
+        # ── Read rows ────────────────────────────────────────────
+        raw_rows: list[tuple] = []
+        if ext in (".xlsx", ".xls"):
+            wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+            ws = wb[wb.sheetnames[0]]
+            raw_rows = list(ws.iter_rows(values_only=True))
+            wb.close()
+        elif ext == ".csv":
+            try:
+                with path.open(newline="", encoding="utf-8-sig") as fh:
+                    raw_rows = [tuple(r) for r in _csv.reader(fh)]
+            except UnicodeDecodeError:
+                with path.open(newline="", encoding="latin-1") as fh:
+                    raw_rows = [tuple(r) for r in _csv.reader(fh)]
+        else:
+            raise ValueError(f"Unsupported extension for financial hydration: {ext}")
+
+        if not raw_rows:
+            return [], ""
+
+        # First row = headers; determine which column holds amounts.
+        headers = [str(h) if h is not None else f"Col{i+1}"
+                   for i, h in enumerate(raw_rows[0])]
+        data_rows = raw_rows[1:]
+
+        # Find the last column that contains at least one numeric value —
+        # that's the most robust proxy for the "amount" column.
+        amount_col_idx = len(headers) - 1  # fallback: last column
+        for col_idx in range(len(headers) - 1, -1, -1):
+            for row in data_rows:
+                cell = row[col_idx] if col_idx < len(row) else None
+                if cell is None:
+                    continue
+                if isinstance(cell, (int, float)):
+                    amount_col_idx = col_idx
+                    break
+                try:
+                    float(str(cell).replace(",", ""))
+                    amount_col_idx = col_idx
+                    break
+                except (ValueError, TypeError):
+                    pass
+            else:
+                continue
+            break
+
+        # ── Build FinancialRow list ─────────────────────────────────
+        financial_rows: list[FinancialRow] = []
+        total_numeric: float = 0.0
+        for row in data_rows:
+            label = str(row[0]).strip() if len(row) > 0 and row[0] is not None else ""
+            raw_amount = row[amount_col_idx] if amount_col_idx < len(row) else None
+
+            # Skip fully empty rows
+            if not label and raw_amount is None:
+                continue
+
+            # Format amount as string; accumulate numeric total
+            if raw_amount is None:
+                amount_str = ""
+            elif isinstance(raw_amount, (int, float)):
+                total_numeric += float(raw_amount)
+                amount_str = f"{raw_amount:,}"
+            else:
+                amount_str = str(raw_amount).strip()
+                try:
+                    total_numeric += float(amount_str.replace(",", ""))
+                except (ValueError, TypeError):
+                    pass  # non-numeric amounts (e.g. "TBD") don't sum
+
+            financial_rows.append(FinancialRow(
+                budget_head=label,
+                estimated_cost=amount_str,
+            ))
+
+        # Format total
+        total_str = f"{total_numeric:,.2f}" if total_numeric else ""
+        return financial_rows, total_str
 
     # ------------------------------------------------------------------
     # Generic document builder (original logic — unchanged)

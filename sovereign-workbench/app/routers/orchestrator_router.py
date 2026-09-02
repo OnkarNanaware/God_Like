@@ -92,6 +92,9 @@ _force_tier_override: Optional[str] = None
 
 _audit_logger = None          # AuditLogger singleton
 _async_audit = None           # AsyncAuditAdapter wrapping _audit_logger
+_orchestrator = None          # Orchestrator singleton
+_startup_resolved: dict = {}  # {modality: model_name} — updated by force_tier
+_startup_gpu_info: dict = {}  # GPU detection result — updated by force_tier
 _vector_store = None          # VectorStore singleton (for KB-awareness in planning)
 _router = None                # Router singleton (for dynamic model selection)
 
@@ -114,6 +117,92 @@ def setup_orchestrator_router(
     _startup_gpu_info = startup_gpu_info
     _vector_store = vector_store
     _router = router
+
+
+def _apply_resolved_to_singletons(new_resolved: dict) -> None:
+    """
+    Propagate a freshly-resolved ``{modality: model_name}`` mapping to every
+    live inference singleton so that actual inference — not just the UI display
+    — uses the new tier.
+
+    Singletons updated
+    ------------------
+    * ``_orchestrator._llm``       — the reasoning / text client
+    * ``VisionExtractTool._llm``  — the vision client (via TOOL_REGISTRY lookup)
+    * ``_router``                  — code + vision + text overrides
+
+    This is intentionally NOT called at startup (singletons are created there
+    directly); it is only invoked after ``POST /hardware/force_tier``.
+    """
+    from app.models.ollama_client import MODEL_REGISTRY, OllamaClient
+    from app.tools.registry import TOOL_REGISTRY
+
+    reasoning_tag = "(unchanged)"
+    code_tag = "(unchanged)"
+    vision_tag = "(unchanged)"
+
+    # ── 1. Reasoning / text client inside Orchestrator ────────────────
+    text_model = new_resolved.get("text")
+    if text_model and text_model in MODEL_REGISTRY and _orchestrator is not None:
+        try:
+            new_text_client = OllamaClient(
+                model_name=text_model,
+                audit_logger=_audit_logger,
+            )
+            _orchestrator._llm = new_text_client
+            reasoning_tag = MODEL_REGISTRY[text_model]["ollama_tag"]
+            _log.info(
+                "[TIER SWITCH] Reasoning client swapped → %s (%s)",
+                text_model,
+                reasoning_tag,
+            )
+        except Exception as exc:
+            _log.warning("[TIER SWITCH] Failed to swap reasoning client: %s", exc)
+
+    # ── 2. Vision client inside VisionExtractTool ─────────────────────
+    vision_model = new_resolved.get("vision")
+    if vision_model and vision_model in MODEL_REGISTRY:
+        vision_tool = TOOL_REGISTRY.get("vision_extract")
+        if vision_tool is not None:
+            try:
+                new_vision_client = OllamaClient(
+                    model_name=vision_model,
+                    audit_logger=_audit_logger,
+                )
+                vision_tool._llm = new_vision_client
+                vision_tag = MODEL_REGISTRY[vision_model]["ollama_tag"]
+                _log.info(
+                    "[TIER SWITCH] Vision client swapped → %s (%s)",
+                    vision_model,
+                    vision_tag,
+                )
+            except Exception as exc:
+                _log.warning("[TIER SWITCH] Failed to swap vision client: %s", exc)
+        else:
+            _log.debug("[TIER SWITCH] vision_extract tool not registered; skipping vision client swap.")
+    else:
+        _log.debug("[TIER SWITCH] No vision model in new_resolved; skipping vision client swap.")
+
+    # ── 3. Router tier overrides (text default, code, vision) ─────────
+    code_model = new_resolved.get("code")
+    if code_model and code_model in MODEL_REGISTRY:
+        code_tag = MODEL_REGISTRY[code_model]["ollama_tag"]
+    elif code_model:
+        code_tag = code_model  # show even if not in registry for the log
+
+    if _router is not None:
+        try:
+            _router.set_resolved_models(new_resolved)
+        except Exception as exc:
+            _log.warning("[TIER SWITCH] Failed to update Router overrides: %s", exc)
+
+    # ── 4. Summary log line (the canary for future regressions) ───────
+    _log.info(
+        "[TIER SWITCH] Active models: reasoning=%s | code=%s | vision=%s",
+        reasoning_tag,
+        code_tag,
+        vision_tag,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +337,12 @@ async def force_tier(tier: str = Form(...)) -> dict:
             _startup_gpu_info = new_gpu_info
 
         _startup_resolved = new_resolved
+
+        # ── Propagate new tier to all live inference singletons ────────────
+        # This is the fix: updating _startup_resolved alone only changes the
+        # display dict; the actual OllamaClient objects held by _orchestrator,
+        # VisionExtractTool, and _router must be swapped here too.
+        _apply_resolved_to_singletons(new_resolved)
     except Exception as exc:
         _log.warning("force_tier re-resolve failed: %s", exc)
         raise HTTPException(
